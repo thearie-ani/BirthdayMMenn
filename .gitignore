@@ -1,0 +1,20 @@
+
+# Environment variables
+.env
+
+# Python virtual environment
+.venv/
+
+# IDE settings
+.vscode/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Database files
+*.db
+*.sqlite3
+
+# Pytest cache
+.pytest_cache/
