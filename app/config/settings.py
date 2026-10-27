@@ -31,3 +31,17 @@ def get_bot_token() -> str:
         )
 
     return token
+
+
+def get_database_url() -> str:
+    """
+    Retrieve the database connection URL from environment variables.
+    
+    If not specified or empty, defaults to a local SQLite file 'birthday_mate.db'
+    located in the project root directory.
+    """
+    url = os.getenv("DATABASE_URL", "").strip().strip("\"'")
+    if not url:
+        default_db = BASE_DIR / "birthday_mate.db"
+        return f"sqlite:///{default_db.as_posix()}"
+    return url

@@ -10,6 +10,7 @@ if str(ROOT_DIR) not in sys.path:
 from telegram.ext import Application, ApplicationBuilder, CommandHandler
 
 from app.config.settings import ConfigurationError, get_bot_token
+from app.db.database import init_db
 from app.bot.handlers.start import start_command, help_command
 
 # Configure logging to display time, level, and message
@@ -43,6 +44,14 @@ def main() -> None:
         token = get_bot_token()
     except ConfigurationError as error:
         print(f"\n[CONFIGURATION ERROR]\n{error}\n")
+        sys.exit(1)
+
+    # Initialize database tables separately from Telegram handlers
+    try:
+        init_db()
+        logger.info("Database initialized successfully.")
+    except Exception as error:
+        logger.error(f"Failed to initialize database: {error}")
         sys.exit(1)
 
     app = create_bot_application(token)
