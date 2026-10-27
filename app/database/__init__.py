@@ -1,7 +1,7 @@
 """
 Database package for BirthdayMate.
 """
-from app.db.database import (
+from app.database.database import (
     Base,
     get_default_engine,
     get_engine,
@@ -10,8 +10,8 @@ from app.db.database import (
     init_db,
     reset_db,
 )
-from app.db.models.friend import Friend
-from app.db.models.user import User
+from app.database.models.friend import Friend
+from app.database.models.user import User
 
 __all__ = [
     "Base",

@@ -6,9 +6,9 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.database import get_session, init_db
-from app.db.models.friend import Friend
-from app.db.models.user import User
+from app.database.database import get_session, init_db
+from app.database.models.friend import Friend
+from app.database.models.user import User
 
 
 @pytest.fixture

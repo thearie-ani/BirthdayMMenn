@@ -78,10 +78,10 @@ def get_session_factory(engine: Optional[Engine] = None) -> sessionmaker[Session
     """
     global _default_session_factory
     if engine is not None:
-        return sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        return sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
     if _default_session_factory is None:
         _default_session_factory = sessionmaker(
-            autocommit=False, autoflush=False, bind=get_default_engine()
+            autocommit=False, autoflush=False, bind=get_default_engine(), expire_on_commit=False
         )
     return _default_session_factory
 
@@ -115,7 +115,7 @@ def init_db(engine: Optional[Engine] = None) -> None:
         engine: Optional target engine. Uses default engine if omitted.
     """
     # Import all models to ensure they are registered with Base.metadata
-    from app.db.models import friend, user  # noqa: F401
+    from app.database.models import friend, user  # noqa: F401
 
     target_engine = engine or get_default_engine()
     Base.metadata.create_all(bind=target_engine)
@@ -126,7 +126,7 @@ def reset_db(engine: Optional[Engine] = None) -> None:
     Drop all existing tables and re-create them.
     Useful for testing and isolated development environments.
     """
-    from app.db.models import friend, user  # noqa: F401
+    from app.database.models import friend, user  # noqa: F401
 
     target_engine = engine or get_default_engine()
     Base.metadata.drop_all(bind=target_engine)

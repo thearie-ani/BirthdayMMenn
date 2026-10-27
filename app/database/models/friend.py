@@ -6,10 +6,10 @@ from typing import TYPE_CHECKING, Optional, Union
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.database import Base
+from app.database.database import Base
 
 if TYPE_CHECKING:
-    from app.db.models.user import User
+    from app.database.models.user import User
 
 
 class Friend(Base):

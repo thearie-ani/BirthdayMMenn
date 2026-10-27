@@ -10,7 +10,7 @@ if str(ROOT_DIR) not in sys.path:
 from telegram.ext import Application, ApplicationBuilder, CommandHandler
 
 from app.config.settings import ConfigurationError, get_bot_token
-from app.db.database import init_db
+from app.database.database import init_db
 from app.bot.handlers.start import start_command, help_command
 
 # Configure logging to display time, level, and message

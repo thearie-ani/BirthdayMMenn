@@ -5,7 +5,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine, inspect
 
 from app.config.settings import get_database_url
-from app.db.database import init_db, normalize_db_url
+from app.database.database import init_db, normalize_db_url
 
 
 def test_required_packages_installed():
