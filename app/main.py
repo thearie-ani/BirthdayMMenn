@@ -24,6 +24,7 @@ from app.bot.handlers.friends import (
     get_search_friend_conversation_handler,
     view_my_friends,
 )
+from app.bot.handlers.birthday import upcoming_birthdays_command
 
 # Configure logging to display time, level, and message
 logging.basicConfig(
@@ -48,6 +49,14 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(MessageHandler(filters.Regex(r"^👥 My Friends$"), view_my_friends))
     app.add_handler(CommandHandler("myfriends", view_my_friends))
     app.add_handler(CommandHandler("friends", view_my_friends))
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^🎂 Upcoming Birthdays$"),
+            upcoming_birthdays_command,
+        )
+    )
+    app.add_handler(CommandHandler("upcoming", upcoming_birthdays_command))
+    app.add_handler(CommandHandler("birthdays", upcoming_birthdays_command))
     app.add_handler(
         MessageHandler(
             filters.Regex(r"^(🔙 Main Menu|🔙 Back to Main Menu|Main Menu)$"),
