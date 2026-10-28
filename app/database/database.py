@@ -115,7 +115,7 @@ def init_db(engine: Optional[Engine] = None) -> None:
         engine: Optional target engine. Uses default engine if omitted.
     """
     # Import all models to ensure they are registered with Base.metadata
-    from app.database.models import friend, user  # noqa: F401
+    from app.database.models import friend, reminder, user  # noqa: F401
 
     target_engine = engine or get_default_engine()
     Base.metadata.create_all(bind=target_engine)
@@ -126,7 +126,7 @@ def reset_db(engine: Optional[Engine] = None) -> None:
     Drop all existing tables and re-create them.
     Useful for testing and isolated development environments.
     """
-    from app.database.models import friend, user  # noqa: F401
+    from app.database.models import friend, reminder, user  # noqa: F401
 
     target_engine = engine or get_default_engine()
     Base.metadata.drop_all(bind=target_engine)

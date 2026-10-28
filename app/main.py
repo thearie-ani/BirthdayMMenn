@@ -25,6 +25,7 @@ from app.bot.handlers.friends import (
     view_my_friends,
 )
 from app.bot.handlers.birthday import upcoming_birthdays_command
+from app.scheduler.birthday_sch import setup_birthday_scheduler
 
 # Configure logging to display time, level, and message
 logging.basicConfig(
@@ -63,6 +64,10 @@ def create_bot_application(token: str) -> Application:
             back_to_main_menu,
         )
     )
+
+    # Configure periodic background reminder scheduler
+    if app.job_queue is not None:
+        setup_birthday_scheduler(app)
 
     return app
 
