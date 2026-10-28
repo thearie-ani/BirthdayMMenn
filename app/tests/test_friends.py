@@ -13,20 +13,41 @@ from telegram.ext import ConversationHandler
 
 from app.bot.handlers.friends import (
     CANCEL_MESSAGE,
+    EMPTY_FRIENDS_MESSAGE,
     PROMPT_NAME_MESSAGE,
+    RETRIEVAL_ERROR_MESSAGE,
     SAVE_ERROR_MESSAGE,
+    SEARCH_CANCEL_MESSAGE,
+    SEARCH_ERROR_MESSAGE,
+    SEARCH_PROMPT_MESSAGE,
     UNREGISTERED_ERROR_MESSAGE,
+    back_to_main_menu,
     cancel_add_friend,
+    cancel_search_friend,
+    cancel_search_to_main_menu,
     get_add_friend_conversation_handler,
+    get_search_friend_conversation_handler,
     invalid_birthday_input,
     invalid_name_input,
+    invalid_search_input,
     process_friend_birthday,
     process_friend_name,
+    process_search_query,
+    search_friends_command,
     start_add_friend,
+    start_search_friend,
+    view_my_friends,
 )
-from app.bot.keyboards.friend_menu import get_cancel_keyboard
+from app.bot.keyboards.friend_menu import (
+    get_cancel_keyboard,
+    get_friend_list_keyboard,
+)
 from app.bot.keyboards.main_menu import get_main_menu_keyboard
-from app.bot.states.friend_states import WAITING_FOR_BIRTHDAY, WAITING_FOR_NAME
+from app.bot.states.friend_states import (
+    WAITING_FOR_BIRTHDAY,
+    WAITING_FOR_NAME,
+    WAITING_FOR_SEARCH_QUERY,
+)
 from app.database.database import get_session, init_db
 from app.database.models.friend import Friend
 from app.database.models.user import User
@@ -35,7 +56,11 @@ from app.main import create_bot_application
 from app.services.friend_ser import (
     UserNotRegisteredError,
     add_friend_for_user,
+    get_friends_for_user,
     handle_add_friend,
+    handle_get_friends,
+    handle_search_friends,
+    search_friends_for_user,
 )
 from app.utils.dates import format_birthday_display
 from app.utils.validators import (
@@ -854,19 +879,22 @@ def test_conversation_handler_configuration():
 
 
 def test_create_bot_application_registers_friend_handler():
-    """Verify create_bot_application registers the Add Friend conversation handler."""
+    """Verify create_bot_application registers friend and search conversation handlers."""
     dummy_token = "123456789:ABCdefGHIjklMNOpqrsTUVwxyz123456789"
     app = create_bot_application(dummy_token)
 
     handlers = app.handlers.get(0, [])
     conv_handlers = [h for h in handlers if isinstance(h, ConversationHandler)]
-    assert len(conv_handlers) == 1
+    assert len(conv_handlers) == 2
 
-    # Check /start and /help are also registered
+    # Check commands are registered
     command_names = [h.commands for h in handlers if hasattr(h, "commands")]
     flattened_commands = [cmd for sub in command_names for cmd in sub]
     assert "start" in flattened_commands
     assert "help" in flattened_commands
+    assert "menu" in flattened_commands
+    assert "myfriends" in flattened_commands
+    assert "friends" in flattened_commands
 
 
 def test_cancel_keyboard_structure():
@@ -876,3 +904,509 @@ def test_cancel_keyboard_structure():
     assert keyboard.resize_keyboard is True
     buttons = [btn.text for row in keyboard.keyboard for btn in row]
     assert "❌ Cancel" in buttons
+
+
+# ==============================================================================
+# Stage 6: My Friends & Search Tests
+# ==============================================================================
+
+
+def test_friend_list_keyboard_structure():
+    """Verify friend list keyboard layout contains search, add friend, and main menu buttons."""
+    keyboard = get_friend_list_keyboard()
+    assert isinstance(keyboard, ReplyKeyboardMarkup)
+    assert keyboard.resize_keyboard is True
+    buttons = [btn.text for row in keyboard.keyboard for btn in row]
+    assert "🔍 Search Friend" in buttons
+    assert "➕ Add Friend" in buttons
+    assert "🔙 Main Menu" in buttons
+
+
+def test_friend_repo_get_by_user_id_alphabetical_order(db_engine, test_user_id):
+    """Verify get_by_user_id returns friends sorted alphabetically by name."""
+    with get_session(db_engine) as session:
+        repo = FriendRepository(session)
+        repo.add(Friend(user_id=test_user_id, name="Zack", birth_month=1, birth_day=1))
+        repo.add(Friend(user_id=test_user_id, name="Alice", birth_month=2, birth_day=2))
+        repo.add(Friend(user_id=test_user_id, name="Brian", birth_month=3, birth_day=3))
+
+    with get_session(db_engine) as session:
+        repo = FriendRepository(session)
+        friends = repo.get_by_user_id(test_user_id)
+        names = [f.name for f in friends]
+        assert names == ["Alice", "Brian", "Zack"]
+
+
+def test_friend_repo_search_by_name(db_engine, test_user_id):
+    """Verify search_by_name finds substring matches case-insensitively and handles empty queries."""
+    with get_session(db_engine) as session:
+        repo = FriendRepository(session)
+        repo.add(Friend(user_id=test_user_id, name="Charlie Brown", birth_month=5, birth_day=5))
+        repo.add(Friend(user_id=test_user_id, name="Alice Charlie", birth_month=6, birth_day=6))
+        repo.add(Friend(user_id=test_user_id, name="David", birth_month=7, birth_day=7))
+
+    with get_session(db_engine) as session:
+        repo = FriendRepository(session)
+        # Case-insensitive substring match
+        matches = repo.search_by_name(test_user_id, "charlie")
+        assert len(matches) == 2
+        assert [m.name for m in matches] == ["Alice Charlie", "Charlie Brown"]
+
+        # Partial match
+        matches_dav = repo.search_by_name(test_user_id, "Dav")
+        assert len(matches_dav) == 1
+        assert matches_dav[0].name == "David"
+
+        # Non-matching query
+        matches_none = repo.search_by_name(test_user_id, "Nobody")
+        assert matches_none == []
+
+        # Empty/whitespace query
+        assert repo.search_by_name(test_user_id, "") == []
+        assert repo.search_by_name(test_user_id, "   ") == []
+
+
+def test_friend_repo_search_special_characters(db_engine, test_user_id):
+    """Verify search properly handles names with special characters like %, _, and punctuation."""
+    with get_session(db_engine) as session:
+        repo = FriendRepository(session)
+        repo.add(Friend(user_id=test_user_id, name="Friend 100% Top", birth_month=1, birth_day=1))
+        repo.add(Friend(user_id=test_user_id, name="User_Special", birth_month=2, birth_day=2))
+        repo.add(Friend(user_id=test_user_id, name="Normal User", birth_month=3, birth_day=3))
+
+    with get_session(db_engine) as session:
+        repo = FriendRepository(session)
+        # Search for exact '%' without wildcard expansion
+        pct_matches = repo.search_by_name(test_user_id, "%")
+        assert len(pct_matches) == 1
+        assert pct_matches[0].name == "Friend 100% Top"
+
+        # Search for exact '_' without single-character wildcard expansion
+        underscore_matches = repo.search_by_name(test_user_id, "_")
+        assert len(underscore_matches) == 1
+        assert underscore_matches[0].name == "User_Special"
+
+
+def test_friend_repo_multi_user_isolation(db_engine):
+    """Verify that FriendRepository strictly isolates queries between distinct users."""
+    with get_session(db_engine) as session:
+        user1 = User(telegram_id=1001, first_name="User1")
+        user2 = User(telegram_id=1002, first_name="User2")
+        session.add_all([user1, user2])
+        session.flush()
+
+        repo = FriendRepository(session)
+        repo.add(Friend(user_id=user1.id, name="Alice (User1)", birth_month=1, birth_day=1))
+        repo.add(Friend(user_id=user2.id, name="Bob (User2)", birth_month=2, birth_day=2))
+        u1_id, u2_id = user1.id, user2.id
+
+    with get_session(db_engine) as session:
+        repo = FriendRepository(session)
+        # User 1 cannot see User 2's friends
+        u1_friends = repo.get_by_user_id(u1_id)
+        assert len(u1_friends) == 1
+        assert u1_friends[0].name == "Alice (User1)"
+
+        # User 2 cannot see User 1's friends
+        u2_friends = repo.get_by_user_id(u2_id)
+        assert len(u2_friends) == 1
+        assert u2_friends[0].name == "Bob (User2)"
+
+        # Search isolation
+        assert repo.search_by_name(u1_id, "Bob") == []
+        assert repo.search_by_name(u2_id, "Alice") == []
+
+
+def test_get_and_search_friends_service(db_engine):
+    """Verify get_friends_for_user and search_friends_for_user service methods."""
+    with get_session(db_engine) as session:
+        user = User(telegram_id=777888999, first_name="ServiceUser")
+        session.add(user)
+        session.flush()
+        repo = FriendRepository(session)
+        repo.add(Friend(user_id=user.id, name="Diana Prince", birth_month=4, birth_day=18, birth_year=1990))
+
+    with get_session(db_engine) as session:
+        friends = get_friends_for_user(session, 777888999)
+        assert len(friends) == 1
+        assert friends[0].name == "Diana Prince"
+
+        matches = search_friends_for_user(session, 777888999, "Prince")
+        assert len(matches) == 1
+        assert matches[0].name == "Diana Prince"
+
+
+def test_service_unregistered_user_raises(db_engine):
+    """Verify get_friends_for_user and search_friends_for_user raise UserNotRegisteredError."""
+    with get_session(db_engine) as session:
+        with pytest.raises(UserNotRegisteredError):
+            get_friends_for_user(session, 999999999)
+
+        with pytest.raises(UserNotRegisteredError):
+            search_friends_for_user(session, 999999999, "query")
+
+
+def test_handle_get_friends_and_search_friends_thread_safe(db_engine):
+    """Verify handle_get_friends and handle_search_friends return detached dictionaries."""
+    with get_session(db_engine) as session:
+        user = User(telegram_id=444555666, first_name="ThreadUser")
+        session.add(user)
+        session.flush()
+        repo = FriendRepository(session)
+        repo.add(Friend(user_id=user.id, name="Bruce Wayne", birth_month=2, birth_day=19, birth_year=1985))
+
+    items = handle_get_friends(444555666, engine=db_engine)
+    assert len(items) == 1
+    assert items[0]["name"] == "Bruce Wayne"
+    assert items[0]["display_birthday"] == "February 19, 1985"
+    assert isinstance(items[0], dict)
+
+    search_items = handle_search_friends(444555666, "Wayne", engine=db_engine)
+    assert len(search_items) == 1
+    assert search_items[0]["name"] == "Bruce Wayne"
+
+
+# ==============================================================================
+# Telegram Handler Tests: My Friends & Search
+# ==============================================================================
+
+
+@pytest.mark.anyio
+async def test_view_my_friends_empty_state(thread_safe_engine):
+    """Verify view_my_friends shows empty message and main menu keyboard when user has no friends."""
+    with get_session(thread_safe_engine) as session:
+        user = User(telegram_id=5001, first_name="EmptyUser")
+        session.add(user)
+
+    mock_message = MagicMock()
+    mock_message.reply_text = AsyncMock()
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+    mock_update.effective_user.id = 5001
+
+    mock_context = MagicMock()
+    mock_context.bot_data = {"db_engine": thread_safe_engine}
+
+    await view_my_friends(mock_update, mock_context)
+
+    mock_message.reply_text.assert_awaited_once()
+    _, kwargs = mock_message.reply_text.call_args
+    assert "You haven't added any friends yet!" in kwargs["text"]
+    assert kwargs["reply_markup"].keyboard == get_main_menu_keyboard().keyboard
+
+
+@pytest.mark.anyio
+async def test_view_my_friends_populated_list(thread_safe_engine):
+    """Verify view_my_friends displays friend names, readable birthdays, and friend list keyboard."""
+    with get_session(thread_safe_engine) as session:
+        user = User(telegram_id=5002, first_name="FriendOwner")
+        session.add(user)
+        session.flush()
+        repo = FriendRepository(session)
+        repo.add(Friend(user_id=user.id, name="Samey", birth_month=4, birth_day=18, birth_year=2010))
+        repo.add(Friend(user_id=user.id, name="Alice", birth_month=10, birth_day=27))
+
+    mock_message = MagicMock()
+    mock_message.reply_text = AsyncMock()
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+    mock_update.effective_user.id = 5002
+
+    mock_context = MagicMock()
+    mock_context.bot_data = {"db_engine": thread_safe_engine}
+
+    await view_my_friends(mock_update, mock_context)
+
+    mock_message.reply_text.assert_awaited_once()
+    _, kwargs = mock_message.reply_text.call_args
+    text = kwargs["text"]
+    assert "👥 My Friends (2)" in text
+    assert "• Alice — October 27" in text
+    assert "• Samey — April 18, 2010" in text
+    assert kwargs["reply_markup"].keyboard == get_friend_list_keyboard().keyboard
+
+
+@pytest.mark.anyio
+async def test_view_my_friends_unregistered_user(thread_safe_engine):
+    """Verify view_my_friends sends registration warning if user is not in database."""
+    mock_message = MagicMock()
+    mock_message.reply_text = AsyncMock()
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+    mock_update.effective_user.id = 9999999
+
+    mock_context = MagicMock()
+    mock_context.bot_data = {"db_engine": thread_safe_engine}
+
+    await view_my_friends(mock_update, mock_context)
+
+    mock_message.reply_text.assert_awaited_once()
+    _, kwargs = mock_message.reply_text.call_args
+    assert "not registered yet" in kwargs["text"]
+    assert kwargs["reply_markup"].keyboard == get_main_menu_keyboard().keyboard
+
+
+@pytest.mark.anyio
+async def test_view_my_friends_handles_unexpected_error(thread_safe_engine):
+    """Verify view_my_friends handles database exceptions gracefully."""
+    mock_message = MagicMock()
+    mock_message.reply_text = AsyncMock()
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+    mock_update.effective_user.id = 5002
+
+    mock_context = MagicMock()
+    mock_context.bot_data = {"db_engine": thread_safe_engine}
+
+    with patch("app.bot.handlers.friends.handle_get_friends", side_effect=SQLAlchemyError("DB failed")):
+        await view_my_friends(mock_update, mock_context)
+
+    mock_message.reply_text.assert_awaited_once()
+    _, kwargs = mock_message.reply_text.call_args
+    assert kwargs["text"] == RETRIEVAL_ERROR_MESSAGE
+
+
+@pytest.mark.anyio
+async def test_back_to_main_menu_handler():
+    """Verify back_to_main_menu replies with main menu keyboard."""
+    mock_message = MagicMock()
+    mock_message.reply_text = AsyncMock()
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+    mock_context = MagicMock()
+
+    await back_to_main_menu(mock_update, mock_context)
+
+    mock_message.reply_text.assert_awaited_once()
+    _, kwargs = mock_message.reply_text.call_args
+    assert kwargs["text"] == "🏠 Main Menu"
+    assert kwargs["reply_markup"].keyboard == get_main_menu_keyboard().keyboard
+
+
+@pytest.mark.anyio
+async def test_search_command_direct_with_arguments(thread_safe_engine):
+    """Verify /search <name> performs direct search and outputs matching results."""
+    with get_session(thread_safe_engine) as session:
+        user = User(telegram_id=6001, first_name="SearchUser")
+        session.add(user)
+        session.flush()
+        repo = FriendRepository(session)
+        repo.add(Friend(user_id=user.id, name="Arthur Dent", birth_month=3, birth_day=11, birth_year=1978))
+
+    mock_message = MagicMock()
+    mock_message.reply_text = AsyncMock()
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+    mock_update.effective_user.id = 6001
+
+    mock_context = MagicMock()
+    mock_context.bot_data = {"db_engine": thread_safe_engine}
+    mock_context.args = ["Arthur"]
+
+    state = await search_friends_command(mock_update, mock_context)
+    assert state == ConversationHandler.END
+
+    mock_message.reply_text.assert_awaited_once()
+    _, kwargs = mock_message.reply_text.call_args
+    assert 'Search results for "Arthur" (1):' in kwargs["text"]
+    assert "• Arthur Dent — March 11, 1978" in kwargs["text"]
+    assert kwargs["reply_markup"].keyboard == get_friend_list_keyboard().keyboard
+
+
+@pytest.mark.anyio
+async def test_search_command_direct_no_match(thread_safe_engine):
+    """Verify /search returns no results message when query doesn't match."""
+    with get_session(thread_safe_engine) as session:
+        user = User(telegram_id=6002, first_name="SearchUser2")
+        session.add(user)
+
+    mock_message = MagicMock()
+    mock_message.reply_text = AsyncMock()
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+    mock_update.effective_user.id = 6002
+
+    mock_context = MagicMock()
+    mock_context.bot_data = {"db_engine": thread_safe_engine}
+    mock_context.args = ["NonExistent"]
+
+    state = await search_friends_command(mock_update, mock_context)
+    assert state == ConversationHandler.END
+
+    mock_message.reply_text.assert_awaited_once()
+    _, kwargs = mock_message.reply_text.call_args
+    assert 'No friends found matching "NonExistent".' in kwargs["text"]
+
+
+@pytest.mark.anyio
+async def test_search_conversation_interactive_flow(thread_safe_engine):
+    """Verify tapping 🔍 Search Friend prompts for name and processes search input."""
+    with get_session(thread_safe_engine) as session:
+        user = User(telegram_id=6003, first_name="InteractiveSearcher")
+        session.add(user)
+        session.flush()
+        repo = FriendRepository(session)
+        repo.add(Friend(user_id=user.id, name="Ford Prefect", birth_month=8, birth_day=20))
+
+    mock_message = MagicMock()
+    mock_message.reply_text = AsyncMock()
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+    mock_update.effective_user.id = 6003
+
+    mock_context = MagicMock()
+    mock_context.bot_data = {"db_engine": thread_safe_engine}
+
+    # Step 1: Start search
+    state = await start_search_friend(mock_update, mock_context)
+    assert state == WAITING_FOR_SEARCH_QUERY
+    assert SEARCH_PROMPT_MESSAGE in mock_message.reply_text.call_args[1]["text"]
+
+    mock_message.reply_text.reset_mock()
+
+    # Step 2: User sends name
+    mock_update.message.text = "Ford"
+    end_state = await process_search_query(mock_update, mock_context)
+    assert end_state == ConversationHandler.END
+
+    _, kwargs = mock_message.reply_text.call_args
+    assert 'Search results for "Ford" (1):' in kwargs["text"]
+    assert "• Ford Prefect — August 20" in kwargs["text"]
+
+
+@pytest.mark.anyio
+async def test_search_conversation_blank_query_reprompt(thread_safe_engine):
+    """Verify blank search input prompts user to enter a valid name."""
+    mock_message = MagicMock()
+    mock_message.reply_text = AsyncMock()
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+    mock_update.message.text = "   "
+    mock_update.effective_user.id = 6003
+
+    mock_context = MagicMock()
+    mock_context.bot_data = {"db_engine": thread_safe_engine}
+
+    state = await process_search_query(mock_update, mock_context)
+    assert state == WAITING_FOR_SEARCH_QUERY
+    assert "Search query cannot be blank" in mock_message.reply_text.call_args[1]["text"]
+
+
+@pytest.mark.anyio
+async def test_search_conversation_cancel():
+    """Verify cancel during search flow aborts cleanly."""
+    mock_message = MagicMock()
+    mock_message.reply_text = AsyncMock()
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+    mock_context = MagicMock()
+
+    state = await cancel_search_friend(mock_update, mock_context)
+    assert state == ConversationHandler.END
+    assert mock_message.reply_text.call_args[1]["text"] == SEARCH_CANCEL_MESSAGE
+
+
+@pytest.mark.anyio
+async def test_search_conversation_back_to_main_menu():
+    """Verify 🔙 Main Menu during search flow cancels search and displays main menu."""
+    mock_message = MagicMock()
+    mock_message.reply_text = AsyncMock()
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+    mock_context = MagicMock()
+
+    state = await cancel_search_to_main_menu(mock_update, mock_context)
+    assert state == ConversationHandler.END
+    assert mock_message.reply_text.call_args[1]["text"] == "🏠 Main Menu"
+    assert mock_message.reply_text.call_args[1]["reply_markup"].keyboard == get_main_menu_keyboard().keyboard
+
+
+@pytest.mark.anyio
+async def test_search_conversation_invalid_non_text_input():
+    """Verify non-text input in search flow prompts for text."""
+    mock_message = MagicMock()
+    mock_message.reply_text = AsyncMock()
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+    mock_context = MagicMock()
+
+    state = await invalid_search_input(mock_update, mock_context)
+    assert state == WAITING_FOR_SEARCH_QUERY
+    assert "send the friend's name as text" in mock_message.reply_text.call_args[1]["text"]
+
+
+def test_search_conversation_handler_configuration():
+    """Verify search conversation handler has correct entry points, states, and fallbacks."""
+    handler = get_search_friend_conversation_handler()
+    assert isinstance(handler, ConversationHandler)
+    assert WAITING_FOR_SEARCH_QUERY in handler.states
+    assert len(handler.entry_points) >= 2
+    assert len(handler.fallbacks) >= 2
+
+
+@pytest.mark.anyio
+async def test_multi_user_bot_handlers_isolation(thread_safe_engine):
+    """Verify through bot handlers that user A never sees user B's friends in list or search."""
+    with get_session(thread_safe_engine) as session:
+        user_a = User(telegram_id=9001, first_name="UserA")
+        user_b = User(telegram_id=9002, first_name="UserB")
+        session.add_all([user_a, user_b])
+        session.flush()
+
+        repo = FriendRepository(session)
+        repo.add(Friend(user_id=user_a.id, name="SecretFriendA", birth_month=1, birth_day=1))
+        repo.add(Friend(user_id=user_b.id, name="SecretFriendB", birth_month=2, birth_day=2))
+
+    mock_message = MagicMock()
+    mock_message.reply_text = AsyncMock()
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+    mock_context = MagicMock()
+    mock_context.bot_data = {"db_engine": thread_safe_engine}
+
+    # User A views their friends
+    mock_update.effective_user.id = 9001
+    await view_my_friends(mock_update, mock_context)
+    text_a = mock_message.reply_text.call_args[1]["text"]
+    assert "SecretFriendA" in text_a
+    assert "SecretFriendB" not in text_a
+
+    mock_message.reply_text.reset_mock()
+
+    # User B views their friends
+    mock_update.effective_user.id = 9002
+    await view_my_friends(mock_update, mock_context)
+    text_b = mock_message.reply_text.call_args[1]["text"]
+    assert "SecretFriendB" in text_b
+    assert "SecretFriendA" not in text_b
+
+    mock_message.reply_text.reset_mock()
+
+    # User A searches for User B's friend
+    mock_update.effective_user.id = 9001
+    mock_context.args = ["SecretFriendB"]
+    await search_friends_command(mock_update, mock_context)
+    search_text_a = mock_message.reply_text.call_args[1]["text"]
+    assert 'No friends found matching "SecretFriendB".' in search_text_a
+
+    mock_message.reply_text.reset_mock()
+
+    # User B searches for User A's friend
+    mock_update.effective_user.id = 9002
+    mock_context.args = ["SecretFriendA"]
+    await search_friends_command(mock_update, mock_context)
+    search_text_b = mock_message.reply_text.call_args[1]["text"]
+    assert 'No friends found matching "SecretFriendA".' in search_text_b

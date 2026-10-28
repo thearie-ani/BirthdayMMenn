@@ -7,12 +7,23 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from telegram.ext import Application, ApplicationBuilder, CommandHandler
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
 from app.config.settings import ConfigurationError, get_bot_token
 from app.database.database import init_db
 from app.bot.handlers.start import start_command, help_command
-from app.bot.handlers.friends import get_add_friend_conversation_handler
+from app.bot.handlers.friends import (
+    back_to_main_menu,
+    get_add_friend_conversation_handler,
+    get_search_friend_conversation_handler,
+    view_my_friends,
+)
 
 # Configure logging to display time, level, and message
 logging.basicConfig(
@@ -31,7 +42,18 @@ def create_bot_application(token: str) -> Application:
     # Register handlers
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("menu", back_to_main_menu))
     app.add_handler(get_add_friend_conversation_handler())
+    app.add_handler(get_search_friend_conversation_handler())
+    app.add_handler(MessageHandler(filters.Regex(r"^👥 My Friends$"), view_my_friends))
+    app.add_handler(CommandHandler("myfriends", view_my_friends))
+    app.add_handler(CommandHandler("friends", view_my_friends))
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^(🔙 Main Menu|🔙 Back to Main Menu|Main Menu)$"),
+            back_to_main_menu,
+        )
+    )
 
     return app
 

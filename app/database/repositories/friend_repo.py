@@ -42,13 +42,41 @@ class FriendRepository:
 
     def get_by_user_id(self, user_id: int) -> List[Friend]:
         """
-        Retrieve all friends belonging to a specific user.
+        Retrieve all friends belonging to a specific user, ordered alphabetically by name.
 
         Args:
             user_id: The user's database primary key ID.
 
         Returns:
-            List of Friend instances.
+            List of Friend instances ordered by name.
         """
-        statement = select(Friend).where(Friend.user_id == user_id)
+        statement = (
+            select(Friend)
+            .where(Friend.user_id == user_id)
+            .order_by(Friend.name.asc(), Friend.id.asc())
+        )
+        return list(self.session.execute(statement).scalars().all())
+
+    def search_by_name(self, user_id: int, query: str) -> List[Friend]:
+        """
+        Search friends belonging to a user by name (case-insensitive substring match).
+
+        Args:
+            user_id: The user's database primary key ID.
+            query: Substring search query.
+
+        Returns:
+            List of matching Friend instances ordered by name.
+        """
+        cleaned_query = query.strip()
+        if not cleaned_query:
+            return []
+        statement = (
+            select(Friend)
+            .where(
+                Friend.user_id == user_id,
+                Friend.name.icontains(cleaned_query, autoescape=True),
+            )
+            .order_by(Friend.name.asc(), Friend.id.asc())
+        )
         return list(self.session.execute(statement).scalars().all())

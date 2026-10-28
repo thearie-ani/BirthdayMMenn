@@ -2,7 +2,7 @@
 Friend service managing business logic and persistence for friends.
 """
 import logging
-from typing import Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -110,3 +110,106 @@ def handle_add_friend(
         )
         # Extract attributes while session is active to prevent DetachedInstanceError
         return friend.id, friend.name, friend.display_birthday()
+
+
+def _friend_to_dict(friend: Friend) -> Dict[str, Any]:
+    """Extract Friend attributes to a detached dictionary safely within a session."""
+    return {
+        "id": friend.id,
+        "user_id": friend.user_id,
+        "name": friend.name,
+        "birth_month": friend.birth_month,
+        "birth_day": friend.birth_day,
+        "birth_year": friend.birth_year,
+        "display_birthday": friend.display_birthday(),
+    }
+
+
+def get_friends_for_user(session: Session, telegram_id: int) -> List[Friend]:
+    """
+    Retrieve all friends saved by a user identified by Telegram ID, ordered alphabetically.
+
+    Args:
+        session: Active SQLAlchemy database session.
+        telegram_id: Telegram user ID.
+
+    Returns:
+        List of Friend entities belonging to the user.
+
+    Raises:
+        UserNotRegisteredError: If the user is not found in the database.
+    """
+    user_repo = UserRepository(session)
+    user = user_repo.get_by_telegram_id(telegram_id)
+    if user is None:
+        raise UserNotRegisteredError(
+            f"User with Telegram ID {telegram_id} is not registered. Please send /start first."
+        )
+
+    friend_repo = FriendRepository(session)
+    return friend_repo.get_by_user_id(user.id)
+
+
+def search_friends_for_user(
+    session: Session, telegram_id: int, query: str
+) -> List[Friend]:
+    """
+    Search friends belonging to a specific Telegram user by name.
+
+    Args:
+        session: Active SQLAlchemy database session.
+        telegram_id: Telegram user ID.
+        query: Search substring.
+
+    Returns:
+        List of matching Friend entities belonging exclusively to this user.
+
+    Raises:
+        UserNotRegisteredError: If the user is not found in the database.
+    """
+    user_repo = UserRepository(session)
+    user = user_repo.get_by_telegram_id(telegram_id)
+    if user is None:
+        raise UserNotRegisteredError(
+            f"User with Telegram ID {telegram_id} is not registered. Please send /start first."
+        )
+
+    friend_repo = FriendRepository(session)
+    return friend_repo.search_by_name(user.id, query)
+
+
+def handle_get_friends(
+    telegram_id: int, engine: Optional[Engine] = None
+) -> List[Dict[str, Any]]:
+    """
+    Manage database session lifecycle for retrieving a user's friends.
+
+    Args:
+        telegram_id: Telegram user ID.
+        engine: Optional target SQLAlchemy Engine.
+
+    Returns:
+        List of dictionaries containing friend display details.
+    """
+    with get_session(engine) as session:
+        friends = get_friends_for_user(session, telegram_id)
+        return [_friend_to_dict(f) for f in friends]
+
+
+def handle_search_friends(
+    telegram_id: int, query: str, engine: Optional[Engine] = None
+) -> List[Dict[str, Any]]:
+    """
+    Manage database session lifecycle for searching a user's friends.
+
+    Args:
+        telegram_id: Telegram user ID.
+        query: Search query string.
+        engine: Optional target SQLAlchemy Engine.
+
+    Returns:
+        List of dictionaries containing matching friend display details.
+    """
+    with get_session(engine) as session:
+        friends = search_friends_for_user(session, telegram_id, query)
+        return [_friend_to_dict(f) for f in friends]
