@@ -10,6 +10,7 @@ if str(ROOT_DIR) not in sys.path:
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -25,6 +26,11 @@ from app.bot.handlers.friends import (
     view_my_friends,
 )
 from app.bot.handlers.birthday import upcoming_birthdays_command
+from app.bot.handlers.settings import (
+    get_settings_conversation_handler,
+    open_settings_command,
+    settings_callback_handler,
+)
 from app.scheduler.birthday_sch import setup_birthday_scheduler
 
 # Configure logging to display time, level, and message
@@ -47,6 +53,7 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(CommandHandler("menu", back_to_main_menu))
     app.add_handler(get_add_friend_conversation_handler())
     app.add_handler(get_search_friend_conversation_handler())
+    app.add_handler(get_settings_conversation_handler())
     app.add_handler(MessageHandler(filters.Regex(r"^👥 My Friends$"), view_my_friends))
     app.add_handler(CommandHandler("myfriends", view_my_friends))
     app.add_handler(CommandHandler("friends", view_my_friends))
@@ -58,6 +65,19 @@ def create_bot_application(token: str) -> Application:
     )
     app.add_handler(CommandHandler("upcoming", upcoming_birthdays_command))
     app.add_handler(CommandHandler("birthdays", upcoming_birthdays_command))
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^⚙️ Settings$"),
+            open_settings_command,
+        )
+    )
+    app.add_handler(CommandHandler("settings", open_settings_command))
+    app.add_handler(
+        CallbackQueryHandler(
+            settings_callback_handler,
+            pattern=r"^settings_",
+        )
+    )
     app.add_handler(
         MessageHandler(
             filters.Regex(r"^(🔙 Main Menu|🔙 Back to Main Menu|Main Menu)$"),
