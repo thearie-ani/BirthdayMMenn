@@ -1,5 +1,5 @@
 """
-Input validation utilities for user and friend data.
+Input validation utilities for user, friend, and preference data.
 """
 from datetime import date
 from typing import Optional, Tuple
@@ -7,6 +7,11 @@ from typing import Optional, Tuple
 MAX_NAME_LENGTH = 100
 MIN_YEAR = 1900
 MAX_YEAR = 2100
+
+MAX_RELATIONSHIP_LENGTH = 64
+MAX_INTERESTS_LENGTH = 500
+MAX_NOTES_LENGTH = 1000
+MAX_WISH_STYLE_LENGTH = 64
 
 
 def validate_friend_name(
@@ -157,3 +162,54 @@ def validate_and_parse_birthday(
             0,
             "Invalid birthday format. Please use DD-MM-YYYY (e.g. 25-12-1995) or DD-MM (e.g. 15-03):",
         )
+
+
+def validate_profile_field(
+    raw_val: Optional[str],
+    max_length: int,
+    field_label: str,
+) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    Validate and sanitize an optional profile field.
+
+    Returns:
+        Tuple[bool, Optional[str], Optional[str]]:
+            - is_valid: True if valid.
+            - cleaned: Stripped string or None if empty.
+            - error_message: None if valid, or error string.
+    """
+    if raw_val is None:
+        return True, None, None
+
+    cleaned = raw_val.strip()
+    if not cleaned:
+        return True, None, None
+
+    if len(cleaned) > max_length:
+        return (
+            False,
+            cleaned,
+            f"{field_label} is too long (maximum {max_length} characters). Please enter a shorter text.",
+        )
+
+    return True, cleaned, None
+
+
+def validate_relationship(raw: Optional[str]) -> Tuple[bool, Optional[str], Optional[str]]:
+    """Validate relationship field (max 64 chars)."""
+    return validate_profile_field(raw, MAX_RELATIONSHIP_LENGTH, "Relationship")
+
+
+def validate_interests(raw: Optional[str]) -> Tuple[bool, Optional[str], Optional[str]]:
+    """Validate interests field (max 500 chars)."""
+    return validate_profile_field(raw, MAX_INTERESTS_LENGTH, "Interests")
+
+
+def validate_notes(raw: Optional[str]) -> Tuple[bool, Optional[str], Optional[str]]:
+    """Validate personal notes field (max 1000 chars)."""
+    return validate_profile_field(raw, MAX_NOTES_LENGTH, "Personal notes")
+
+
+def validate_wish_style(raw: Optional[str]) -> Tuple[bool, Optional[str], Optional[str]]:
+    """Validate wish style field (max 64 chars)."""
+    return validate_profile_field(raw, MAX_WISH_STYLE_LENGTH, "Wish style")

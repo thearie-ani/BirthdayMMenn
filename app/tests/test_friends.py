@@ -13,6 +13,7 @@ from telegram.ext import ConversationHandler
 
 from app.bot.handlers.friends import (
     CANCEL_MESSAGE,
+    CANCEL_PROFILE_MESSAGE,
     EMPTY_FRIENDS_MESSAGE,
     PROMPT_NAME_MESSAGE,
     RETRIEVAL_ERROR_MESSAGE,
@@ -23,49 +24,83 @@ from app.bot.handlers.friends import (
     UNREGISTERED_ERROR_MESSAGE,
     back_to_main_menu,
     cancel_add_friend,
+    cancel_profile_input,
     cancel_search_friend,
     cancel_search_to_main_menu,
+    format_friend_profile_message,
+    friend_profile_callback_handler,
     get_add_friend_conversation_handler,
+    get_friend_profile_conversation_handler,
     get_search_friend_conversation_handler,
     invalid_birthday_input,
     invalid_name_input,
+    invalid_profile_text_input,
     invalid_search_input,
+    open_friend_profile_command,
     process_friend_birthday,
     process_friend_name,
+    process_profile_interests,
+    process_profile_notes,
+    process_profile_relationship,
+    process_profile_wish_style,
     process_search_query,
     search_friends_command,
     start_add_friend,
+    start_prompt_interests,
+    start_prompt_notes,
+    start_prompt_relationship,
+    start_prompt_wish_style,
     start_search_friend,
     view_my_friends,
 )
 from app.bot.keyboards.friend_menu import (
     get_cancel_keyboard,
     get_friend_list_keyboard,
+    get_friend_profile_inline_keyboard,
+    get_friends_inline_keyboard,
+    get_relationship_presets_inline_keyboard,
+    get_wish_style_presets_inline_keyboard,
 )
 from app.bot.keyboards.main_menu import get_main_menu_keyboard
 from app.bot.states.friend_states import (
     WAITING_FOR_BIRTHDAY,
     WAITING_FOR_NAME,
+    WAITING_FOR_PROFILE_INTERESTS,
+    WAITING_FOR_PROFILE_NOTES,
+    WAITING_FOR_PROFILE_RELATIONSHIP,
+    WAITING_FOR_PROFILE_WISH_STYLE,
     WAITING_FOR_SEARCH_QUERY,
 )
 from app.database.database import get_session, init_db
 from app.database.models.friend import Friend
+from app.database.models.preference import FriendPreference
 from app.database.models.user import User
 from app.database.repositories.friend_repo import FriendRepository
 from app.main import create_bot_application
 from app.services.friend_ser import (
+    FriendNotFoundError,
     UserNotRegisteredError,
     add_friend_for_user,
+    clear_friend_profile_for_user,
+    get_friend_profile_for_user,
     get_friends_for_user,
     handle_add_friend,
+    handle_clear_friend_profile,
+    handle_get_friend_profile,
     handle_get_friends,
     handle_search_friends,
+    handle_update_friend_profile,
     search_friends_for_user,
+    update_friend_profile_for_user,
 )
 from app.utils.dates import format_birthday_display
 from app.utils.validators import (
     validate_and_parse_birthday,
     validate_friend_name,
+    validate_interests,
+    validate_notes,
+    validate_relationship,
+    validate_wish_style,
 )
 
 
@@ -1410,3 +1445,669 @@ async def test_multi_user_bot_handlers_isolation(thread_safe_engine):
     await search_friends_command(mock_update, mock_context)
     search_text_b = mock_message.reply_text.call_args[1]["text"]
     assert 'No friends found matching "SecretFriendA".' in search_text_b
+
+
+# ==============================================================================
+# Stage 9 Tests: Friend Profiles & Preferences
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# 1. Model & Schema Tests
+# ------------------------------------------------------------------------------
+
+
+def test_friend_preference_model_creation(db_engine, test_user_id):
+    """Verify FriendPreference can be persisted and loaded with all optional fields."""
+    with get_session(db_engine) as session:
+        friend = Friend(user_id=test_user_id, name="Charlie", birth_month=7, birth_day=14)
+        session.add(friend)
+        session.flush()
+
+        pref = FriendPreference(
+            friend_id=friend.id,
+            relationship="Classmate",
+            interests="Chess, Classical Music",
+            notes="Study partner at CADT",
+            wish_style="Poetic & Creative",
+        )
+        session.add(pref)
+
+    with get_session(db_engine) as session:
+        loaded = session.execute(
+            select(FriendPreference).where(FriendPreference.friend_id == friend.id)
+        ).scalar_one()
+
+        assert loaded.id is not None
+        assert loaded.relationship == "Classmate"
+        assert loaded.interests == "Chess, Classical Music"
+        assert loaded.notes == "Study partner at CADT"
+        assert loaded.wish_style == "Poetic & Creative"
+        assert loaded.created_at is not None
+        assert loaded.updated_at is not None
+        assert "Classmate" in repr(loaded)
+
+
+def test_friend_preference_unique_friend_id_constraint(db_engine, test_user_id):
+    """Verify that multiple preferences for the same friend are rejected by unique constraint."""
+    with get_session(db_engine) as session:
+        friend = Friend(user_id=test_user_id, name="Diana", birth_month=3, birth_day=5)
+        session.add(friend)
+        session.flush()
+        session.add(FriendPreference(friend_id=friend.id, relationship="Friend"))
+
+    with pytest.raises(IntegrityError):
+        with get_session(db_engine) as session:
+            session.add(FriendPreference(friend_id=friend.id, relationship="Colleague"))
+
+
+def test_friend_preference_cascade_delete(db_engine, test_user_id):
+    """Verify that deleting a friend cascades and deletes its FriendPreference record."""
+    with get_session(db_engine) as session:
+        friend = Friend(user_id=test_user_id, name="Eve", birth_month=11, birth_day=23)
+        session.add(friend)
+        session.flush()
+        pref = FriendPreference(friend_id=friend.id, relationship="Family")
+        session.add(pref)
+
+    # Delete the friend
+    with get_session(db_engine) as session:
+        f = session.get(Friend, friend.id)
+        session.delete(f)
+
+    # Preference must also be deleted
+    with get_session(db_engine) as session:
+        p = session.execute(
+            select(FriendPreference).where(FriendPreference.friend_id == friend.id)
+        ).scalar_one_or_none()
+        assert p is None
+
+
+# ------------------------------------------------------------------------------
+# 2. Service Layer & DTO Tests
+# ------------------------------------------------------------------------------
+
+
+def test_get_friend_profile_existing_friend_without_profile(db_engine, test_user_id):
+    """Verify that a friend created without profile returns safe defaults and has_profile=False."""
+    with get_session(db_engine) as session:
+        user = session.get(User, test_user_id)
+        friend = Friend(user_id=test_user_id, name="Frank", birth_month=1, birth_day=1)
+        session.add(friend)
+        session.flush()
+        f_id = friend.id
+        tg_id = user.telegram_id
+
+    profile = handle_get_friend_profile(telegram_id=tg_id, friend_id=f_id, engine=db_engine)
+    assert profile["friend_id"] == f_id
+    assert profile["name"] == "Frank"
+    assert profile["relationship"] is None
+    assert profile["interests"] is None
+    assert profile["notes"] is None
+    assert profile["wish_style"] is None
+    assert profile["has_profile"] is False
+
+
+def test_update_and_clear_friend_profile(db_engine, test_user_id):
+    """Verify updating fields on a friend profile and subsequent clearing."""
+    with get_session(db_engine) as session:
+        user = session.get(User, test_user_id)
+        friend = Friend(user_id=test_user_id, name="Grace", birth_month=5, birth_day=20)
+        session.add(friend)
+        session.flush()
+        f_id = friend.id
+        tg_id = user.telegram_id
+
+    # Update profile fields
+    updated = handle_update_friend_profile(
+        telegram_id=tg_id,
+        friend_id=f_id,
+        relationship="Colleague",
+        interests="Coding, Coffee",
+        notes="Works on backend team",
+        wish_style="Warm & Heartfelt",
+        engine=db_engine,
+    )
+    assert updated["relationship"] == "Colleague"
+    assert updated["interests"] == "Coding, Coffee"
+    assert updated["notes"] == "Works on backend team"
+    assert updated["wish_style"] == "Warm & Heartfelt"
+    assert updated["has_profile"] is True
+
+    # Partial update preserves other fields
+    partial = handle_update_friend_profile(
+        telegram_id=tg_id,
+        friend_id=f_id,
+        wish_style="Funny & Humorous",
+        engine=db_engine,
+    )
+    assert partial["relationship"] == "Colleague"
+    assert partial["interests"] == "Coding, Coffee"
+    assert partial["wish_style"] == "Funny & Humorous"
+
+    # Clearing field with empty string
+    cleared_rel = handle_update_friend_profile(
+        telegram_id=tg_id,
+        friend_id=f_id,
+        relationship="",
+        engine=db_engine,
+    )
+    assert cleared_rel["relationship"] is None
+    assert cleared_rel["interests"] == "Coding, Coffee"
+
+    # Full clear
+    cleared_all = handle_clear_friend_profile(
+        telegram_id=tg_id, friend_id=f_id, engine=db_engine
+    )
+    assert cleared_all["relationship"] is None
+    assert cleared_all["interests"] is None
+    assert cleared_all["notes"] is None
+    assert cleared_all["wish_style"] is None
+    assert cleared_all["has_profile"] is False
+
+
+def test_friend_profile_strict_user_isolation(db_engine):
+    """Verify that User B cannot view, update, or clear User A's friend profile."""
+    with get_session(db_engine) as session:
+        user_a = User(telegram_id=7101, first_name="UserA")
+        user_b = User(telegram_id=7102, first_name="UserB")
+        session.add_all([user_a, user_b])
+        session.flush()
+
+        friend_a = Friend(user_id=user_a.id, name="FriendA", birth_month=8, birth_day=8)
+        session.add(friend_a)
+        session.flush()
+        f_id = friend_a.id
+
+    # User B attempts to read User A's friend profile
+    with pytest.raises(FriendNotFoundError):
+        handle_get_friend_profile(telegram_id=7102, friend_id=f_id, engine=db_engine)
+
+    # User B attempts to update User A's friend profile
+    with pytest.raises(FriendNotFoundError):
+        handle_update_friend_profile(
+            telegram_id=7102, friend_id=f_id, relationship="Hacker", engine=db_engine
+        )
+
+    # User B attempts to clear User A's friend profile
+    with pytest.raises(FriendNotFoundError):
+        handle_clear_friend_profile(telegram_id=7102, friend_id=f_id, engine=db_engine)
+
+
+def test_friend_profile_unregistered_user(db_engine):
+    """Verify that an unregistered telegram_id raises UserNotRegisteredError."""
+    with pytest.raises(UserNotRegisteredError):
+        handle_get_friend_profile(telegram_id=999999, friend_id=1, engine=db_engine)
+
+
+# ------------------------------------------------------------------------------
+# 3. Validator Tests
+# ------------------------------------------------------------------------------
+
+
+def test_profile_field_validators():
+    """Verify validation and sanitization for relationship, interests, notes, and wish_style."""
+    # Valid and trimmed
+    ok, cleaned, err = validate_relationship("   Lecturer   ")
+    assert ok and cleaned == "Lecturer" and err is None
+
+    # Empty and None are valid (optional)
+    ok, cleaned, err = validate_relationship("")
+    assert ok and cleaned is None and err is None
+    ok, cleaned, err = validate_relationship(None)
+    assert ok and cleaned is None and err is None
+
+    # Exceeding length limits
+    ok, _, err = validate_relationship("X" * 65)
+    assert not ok and "too long" in err
+
+    ok, _, err = validate_interests("Y" * 501)
+    assert not ok and "too long" in err
+
+    ok, _, err = validate_notes("Z" * 1001)
+    assert not ok and "too long" in err
+
+    ok, _, err = validate_wish_style("W" * 65)
+    assert not ok and "too long" in err
+
+
+# ------------------------------------------------------------------------------
+# 4. Telegram UI & Command Tests
+# ------------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_format_friend_profile_message():
+    """Verify format_friend_profile_message outputs readable formatted card."""
+    profile_unset = {
+        "name": "Alex",
+        "display_birthday": "December 25",
+        "relationship": None,
+        "interests": None,
+        "notes": None,
+        "wish_style": None,
+    }
+    msg_unset = format_friend_profile_message(profile_unset)
+    assert "👤 Friend Profile: Alex" in msg_unset
+    assert "🎂 Birthday: December 25" in msg_unset
+    assert "👥 Relationship: Not set" in msg_unset
+
+    profile_set = {
+        "name": "Alex",
+        "display_birthday": "December 25",
+        "relationship": "Classmate",
+        "interests": "Robotics",
+        "notes": "Met in lab",
+        "wish_style": "Funny & Humorous",
+    }
+    msg_set = format_friend_profile_message(profile_set)
+    assert "👥 Relationship: Classmate" in msg_set
+    assert "🎨 Interests & Hobbies: Robotics" in msg_set
+    assert "✨ Wish Style: Funny & Humorous" in msg_set
+
+
+@pytest.mark.anyio
+async def test_open_profile_command_no_friends(thread_safe_engine):
+    """Verify /profile shows friendly empty message when user has no friends."""
+    with get_session(thread_safe_engine) as session:
+        session.add(User(telegram_id=8101, first_name="NoFriendUser"))
+
+    mock_msg = MagicMock()
+    mock_msg.reply_text = AsyncMock()
+    update = MagicMock(message=mock_msg, effective_user=MagicMock(id=8101))
+    context = MagicMock(args=[], bot_data={"db_engine": thread_safe_engine})
+
+    await open_friend_profile_command(update, context)
+    mock_msg.reply_text.assert_awaited_once()
+    assert "You haven't added any friends yet" in mock_msg.reply_text.call_args[1]["text"]
+
+
+@pytest.mark.anyio
+async def test_open_profile_command_lists_friends(thread_safe_engine):
+    """Verify /profile without args shows inline buttons for friends."""
+    with get_session(thread_safe_engine) as session:
+        u = User(telegram_id=8102, first_name="ListUser")
+        session.add(u)
+        session.flush()
+        f1 = Friend(user_id=u.id, name="Harry", birth_month=7, birth_day=31)
+        f2 = Friend(user_id=u.id, name="Hermione", birth_month=9, birth_day=19)
+        session.add_all([f1, f2])
+
+    mock_msg = MagicMock()
+    mock_msg.reply_text = AsyncMock()
+    update = MagicMock(message=mock_msg, effective_user=MagicMock(id=8102))
+    context = MagicMock(args=[], bot_data={"db_engine": thread_safe_engine})
+
+    await open_friend_profile_command(update, context)
+    mock_msg.reply_text.assert_awaited_once()
+    kwargs = mock_msg.reply_text.call_args[1]
+    assert "👤 Friend Profiles" in kwargs["text"]
+    assert kwargs["reply_markup"] is not None
+
+
+@pytest.mark.anyio
+async def test_open_profile_command_with_name_arg(thread_safe_engine):
+    """Verify /profile <name> opens that friend's profile card directly."""
+    with get_session(thread_safe_engine) as session:
+        u = User(telegram_id=8103, first_name="SearchUser")
+        session.add(u)
+        session.flush()
+        f = Friend(user_id=u.id, name="Ron", birth_month=3, birth_day=1)
+        session.add(f)
+
+    mock_msg = MagicMock()
+    mock_msg.reply_text = AsyncMock()
+    update = MagicMock(message=mock_msg, effective_user=MagicMock(id=8103))
+    context = MagicMock(args=["Ron"], bot_data={"db_engine": thread_safe_engine})
+
+    await open_friend_profile_command(update, context)
+    mock_msg.reply_text.assert_awaited_once()
+    kwargs = mock_msg.reply_text.call_args[1]
+    assert "👤 Friend Profile: Ron" in kwargs["text"]
+
+
+@pytest.mark.anyio
+async def test_open_profile_command_not_found(thread_safe_engine):
+    """Verify /profile <unknown> replies with no matching friends."""
+    with get_session(thread_safe_engine) as session:
+        session.add(User(telegram_id=8104, first_name="User"))
+
+    mock_msg = MagicMock()
+    mock_msg.reply_text = AsyncMock()
+    update = MagicMock(message=mock_msg, effective_user=MagicMock(id=8104))
+    context = MagicMock(args=["UnknownPerson"], bot_data={"db_engine": thread_safe_engine})
+
+    await open_friend_profile_command(update, context)
+    mock_msg.reply_text.assert_awaited_once()
+    assert 'No friends found matching "UnknownPerson"' in mock_msg.reply_text.call_args[1]["text"]
+
+
+# ------------------------------------------------------------------------------
+# 5. Telegram Callback Query Tests
+# ------------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_callback_view_profile_and_presets(thread_safe_engine):
+    """Verify interactive callback flows for profile view, preset selection, and clearing."""
+    with get_session(thread_safe_engine) as session:
+        u = User(telegram_id=8201, first_name="CallbackUser")
+        session.add(u)
+        session.flush()
+        f = Friend(user_id=u.id, name="Luna", birth_month=2, birth_day=13)
+        session.add(f)
+        session.flush()
+        f_id = f.id
+
+    mock_msg = MagicMock()
+    mock_msg.edit_message_text = AsyncMock()
+    mock_query = MagicMock(message=mock_msg)
+    mock_query.answer = AsyncMock()
+    mock_query.edit_message_text = AsyncMock()
+    update = MagicMock(callback_query=mock_query, effective_user=MagicMock(id=8201))
+    context = MagicMock(bot_data={"db_engine": thread_safe_engine})
+
+    # 1. View profile
+    mock_query.data = f"fprof_view:{f_id}"
+    await friend_profile_callback_handler(update, context)
+    mock_query.edit_message_text.assert_awaited_once()
+    assert "👤 Friend Profile: Luna" in mock_query.edit_message_text.call_args[1]["text"]
+    mock_query.edit_message_text.reset_mock()
+
+    # 2. Open relationship menu
+    mock_query.data = f"fprof_rel_menu:{f_id}"
+    await friend_profile_callback_handler(update, context)
+    assert "Select relationship for Luna" in mock_query.edit_message_text.call_args[1]["text"]
+    mock_query.edit_message_text.reset_mock()
+
+    # 3. Choose relationship preset
+    mock_query.data = f"fprof_set_rel:{f_id}:Classmate"
+    await friend_profile_callback_handler(update, context)
+    assert "👥 Relationship: Classmate" in mock_query.edit_message_text.call_args[1]["text"]
+    mock_query.edit_message_text.reset_mock()
+
+    # 4. Open wish style menu
+    mock_query.data = f"fprof_style_menu:{f_id}"
+    await friend_profile_callback_handler(update, context)
+    assert "Select preferred birthday-wish style for Luna" in mock_query.edit_message_text.call_args[1]["text"]
+    mock_query.edit_message_text.reset_mock()
+
+    # 5. Choose wish style preset
+    mock_query.data = f"fprof_set_style:{f_id}:Warm & Heartfelt"
+    await friend_profile_callback_handler(update, context)
+    assert "✨ Wish Style: Warm & Heartfelt" in mock_query.edit_message_text.call_args[1]["text"]
+    mock_query.edit_message_text.reset_mock()
+
+    # 6. Clear profile
+    mock_query.data = f"fprof_clear:{f_id}"
+    await friend_profile_callback_handler(update, context)
+    assert "👥 Relationship: Not set" in mock_query.edit_message_text.call_args[1]["text"]
+    assert "✨ Wish Style: Not set" in mock_query.edit_message_text.call_args[1]["text"]
+    mock_query.edit_message_text.reset_mock()
+
+    # 7. Back to friends list
+    mock_query.data = "fprof_back_list"
+    await friend_profile_callback_handler(update, context)
+    assert "👤 Friend Profiles" in mock_query.edit_message_text.call_args[1]["text"]
+
+
+@pytest.mark.anyio
+async def test_callback_user_isolation(thread_safe_engine):
+    """Verify that User B cannot trigger callback operations on User A's friend."""
+    with get_session(thread_safe_engine) as session:
+        u1 = User(telegram_id=8301, first_name="U1")
+        u2 = User(telegram_id=8302, first_name="U2")
+        session.add_all([u1, u2])
+        session.flush()
+        f1 = Friend(user_id=u1.id, name="SecretFriend", birth_month=4, birth_day=4)
+        session.add(f1)
+        session.flush()
+        f_id = f1.id
+
+    mock_query = MagicMock()
+    mock_query.answer = AsyncMock()
+    mock_query.data = f"fprof_view:{f_id}"
+    update = MagicMock(callback_query=mock_query, effective_user=MagicMock(id=8302))
+    context = MagicMock(bot_data={"db_engine": thread_safe_engine})
+
+    await friend_profile_callback_handler(update, context)
+    mock_query.answer.assert_awaited_once_with("Friend not found or permission denied.")
+
+
+# ------------------------------------------------------------------------------
+# 6. ConversationHandler & Text Input Tests
+# ------------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_conversation_custom_relationship(thread_safe_engine):
+    """Verify custom relationship text input flow."""
+    with get_session(thread_safe_engine) as session:
+        u = User(telegram_id=8401, first_name="InputUser")
+        session.add(u)
+        session.flush()
+        f = Friend(user_id=u.id, name="Neville", birth_month=7, birth_day=30)
+        session.add(f)
+        session.flush()
+        f_id = f.id
+
+    # 1. Start prompt
+    mock_query = MagicMock(data=f"fprof_prompt_rel:{f_id}")
+    mock_query.answer = AsyncMock()
+    mock_query.message = MagicMock(reply_text=AsyncMock())
+    update1 = MagicMock(callback_query=mock_query, effective_user=MagicMock(id=8401))
+    context = MagicMock(user_data={}, bot_data={"db_engine": thread_safe_engine})
+
+    state = await start_prompt_relationship(update1, context)
+    assert state == WAITING_FOR_PROFILE_RELATIONSHIP
+    assert context.user_data["editing_friend_id"] == f_id
+    assert context.user_data["editing_state"] == WAITING_FOR_PROFILE_RELATIONSHIP
+
+    # 2. Process text input
+    mock_msg = MagicMock(text="Childhood Best Friend", reply_text=AsyncMock())
+    update2 = MagicMock(message=mock_msg, effective_user=MagicMock(id=8401))
+
+    end_state = await process_profile_relationship(update2, context)
+    assert end_state == ConversationHandler.END
+
+    # Check database persistence
+    profile = handle_get_friend_profile(telegram_id=8401, friend_id=f_id, engine=thread_safe_engine)
+    assert profile["relationship"] == "Childhood Best Friend"
+
+
+@pytest.mark.anyio
+async def test_conversation_custom_interests_and_notes(thread_safe_engine):
+    """Verify custom interests and notes text input flows."""
+    with get_session(thread_safe_engine) as session:
+        u = User(telegram_id=8402, first_name="NotesUser")
+        session.add(u)
+        session.flush()
+        f = Friend(user_id=u.id, name="Ginny", birth_month=8, birth_day=11)
+        session.add(f)
+        session.flush()
+        f_id = f.id
+
+    # Interests prompt and save
+    mock_query = MagicMock(data=f"fprof_prompt_interests:{f_id}")
+    mock_query.answer = AsyncMock()
+    mock_query.message = MagicMock(reply_text=AsyncMock())
+    update1 = MagicMock(callback_query=mock_query, effective_user=MagicMock(id=8402))
+    context = MagicMock(user_data={}, bot_data={"db_engine": thread_safe_engine})
+
+    state = await start_prompt_interests(update1, context)
+    assert state == WAITING_FOR_PROFILE_INTERESTS
+    assert context.user_data["editing_state"] == WAITING_FOR_PROFILE_INTERESTS
+
+    mock_msg = MagicMock(text="Quidditch, Herbology", reply_text=AsyncMock())
+    update2 = MagicMock(message=mock_msg, effective_user=MagicMock(id=8402))
+    end_state = await process_profile_interests(update2, context)
+    assert end_state == ConversationHandler.END
+
+    # Notes prompt and save
+    mock_query2 = MagicMock(data=f"fprof_prompt_notes:{f_id}")
+    mock_query2.answer = AsyncMock()
+    mock_query2.message = MagicMock(reply_text=AsyncMock())
+    update3 = MagicMock(callback_query=mock_query2, effective_user=MagicMock(id=8402))
+
+    state = await start_prompt_notes(update3, context)
+    assert state == WAITING_FOR_PROFILE_NOTES
+    assert context.user_data["editing_state"] == WAITING_FOR_PROFILE_NOTES
+
+    mock_msg2 = MagicMock(text="Captain of the Gryffindor team", reply_text=AsyncMock())
+    update4 = MagicMock(message=mock_msg2, effective_user=MagicMock(id=8402))
+    end_state = await process_profile_notes(update4, context)
+    assert end_state == ConversationHandler.END
+
+    # Wish style prompt and save
+    mock_query3 = MagicMock(data=f"fprof_prompt_style:{f_id}")
+    mock_query3.answer = AsyncMock()
+    mock_query3.message = MagicMock(reply_text=AsyncMock())
+    update5 = MagicMock(callback_query=mock_query3, effective_user=MagicMock(id=8402))
+
+    state = await start_prompt_wish_style(update5, context)
+    assert state == WAITING_FOR_PROFILE_WISH_STYLE
+
+    mock_msg3 = MagicMock(text="Enthusiastic & Energetic", reply_text=AsyncMock())
+    update6 = MagicMock(message=mock_msg3, effective_user=MagicMock(id=8402))
+    end_state = await process_profile_wish_style(update6, context)
+    assert end_state == ConversationHandler.END
+
+    profile = handle_get_friend_profile(telegram_id=8402, friend_id=f_id, engine=thread_safe_engine)
+    assert profile["interests"] == "Quidditch, Herbology"
+    assert profile["notes"] == "Captain of the Gryffindor team"
+    assert profile["wish_style"] == "Enthusiastic & Energetic"
+
+
+@pytest.mark.anyio
+async def test_conversation_cancellation_and_invalid_input(thread_safe_engine):
+    """Verify cancellation keywords and validation error handling during profile editing."""
+    context = MagicMock(user_data={"editing_friend_id": 999})
+    mock_msg = MagicMock(text="❌ Cancel", reply_text=AsyncMock())
+    update = MagicMock(message=mock_msg, callback_query=None)
+
+    # Cancel via keyword in relationship state
+    end_state = await process_profile_relationship(update, context)
+    assert end_state == ConversationHandler.END
+    assert "editing_friend_id" not in context.user_data
+
+    # Invalid input (too long) stays in state
+    context.user_data["editing_friend_id"] = 999
+    mock_msg_long = MagicMock(text="A" * 70, reply_text=AsyncMock())
+    update_long = MagicMock(message=mock_msg_long)
+    state = await process_profile_relationship(update_long, context)
+    assert state == WAITING_FOR_PROFILE_RELATIONSHIP
+    assert "too long" in mock_msg_long.reply_text.call_args[1]["text"]
+
+    # Non-text input explains text is required and stays in active state
+    context.user_data["editing_state"] = WAITING_FOR_PROFILE_RELATIONSHIP
+    non_text_msg = MagicMock(reply_text=AsyncMock())
+    update_non_text = MagicMock(message=non_text_msg)
+    state = await invalid_profile_text_input(update_non_text, context)
+    assert state == WAITING_FOR_PROFILE_RELATIONSHIP
+    assert "Text is required" in non_text_msg.reply_text.call_args[1]["text"]
+    assert context.user_data["editing_friend_id"] == 999
+
+
+@pytest.mark.anyio
+async def test_profile_prompt_cross_user_forged_callbacks(thread_safe_engine):
+    """Verify that User B cannot trigger edit prompts for User A's friend via forged callbacks."""
+    with get_session(thread_safe_engine) as session:
+        u_a = User(telegram_id=9501, first_name="OwnerUser")
+        u_b = User(telegram_id=9502, first_name="AttackerUser")
+        session.add_all([u_a, u_b])
+        session.flush()
+        f_a = Friend(user_id=u_a.id, name="Alice", birth_month=6, birth_day=15)
+        session.add(f_a)
+        session.flush()
+        fa_id = f_a.id
+
+    # Test all 4 prompt callbacks with forged friend_id
+    prompt_starters = [
+        (start_prompt_relationship, f"fprof_prompt_rel:{fa_id}"),
+        (start_prompt_interests, f"fprof_prompt_interests:{fa_id}"),
+        (start_prompt_notes, f"fprof_prompt_notes:{fa_id}"),
+        (start_prompt_wish_style, f"fprof_prompt_style:{fa_id}"),
+    ]
+
+    for starter_fn, callback_data in prompt_starters:
+        mock_query = MagicMock(data=callback_data)
+        mock_query.answer = AsyncMock()
+        mock_query.message = MagicMock(reply_text=AsyncMock())
+        update = MagicMock(callback_query=mock_query, effective_user=MagicMock(id=9502))
+        context = MagicMock(user_data={}, bot_data={"db_engine": thread_safe_engine})
+
+        state = await starter_fn(update, context)
+        assert state == ConversationHandler.END
+        mock_query.answer.assert_awaited_once_with("Friend not found or permission denied.")
+        mock_query.message.reply_text.assert_not_called()
+        assert "editing_friend_id" not in context.user_data
+        assert "editing_state" not in context.user_data
+
+    # Database remains unchanged
+    with get_session(thread_safe_engine) as session:
+        p = session.execute(
+            select(FriendPreference).where(FriendPreference.friend_id == fa_id)
+        ).scalar_one_or_none()
+        assert p is None
+
+
+@pytest.mark.anyio
+async def test_conversation_unsupported_input_retry_and_cancel(thread_safe_engine):
+    """Verify conversation stays active after non-text input, allowing retry with text or cancel."""
+    with get_session(thread_safe_engine) as session:
+        u = User(telegram_id=9601, first_name="RetryUser")
+        session.add(u)
+        session.flush()
+        f = Friend(user_id=u.id, name="Oliver", birth_month=11, birth_day=5)
+        session.add(f)
+        session.flush()
+        f_id = f.id
+
+    # 1. Start relationship prompt
+    mock_query = MagicMock(data=f"fprof_prompt_rel:{f_id}")
+    mock_query.answer = AsyncMock()
+    mock_query.message = MagicMock(reply_text=AsyncMock())
+    update_start = MagicMock(callback_query=mock_query, effective_user=MagicMock(id=9601))
+    context = MagicMock(user_data={}, bot_data={"db_engine": thread_safe_engine})
+
+    state = await start_prompt_relationship(update_start, context)
+    assert state == WAITING_FOR_PROFILE_RELATIONSHIP
+    assert context.user_data["editing_friend_id"] == f_id
+    assert context.user_data["editing_state"] == WAITING_FOR_PROFILE_RELATIONSHIP
+
+    # 2. User sends unsupported input (sticker/photo/voice)
+    non_text_msg = MagicMock(text=None, reply_text=AsyncMock())
+    update_invalid = MagicMock(message=non_text_msg, effective_user=MagicMock(id=9601))
+    ret_state = await invalid_profile_text_input(update_invalid, context)
+    assert ret_state == WAITING_FOR_PROFILE_RELATIONSHIP
+    assert "Text is required" in non_text_msg.reply_text.call_args[1]["text"]
+    assert context.user_data["editing_friend_id"] == f_id
+
+    # 3. User retries with valid text
+    valid_msg = MagicMock(text="Teammate", reply_text=AsyncMock())
+    update_valid = MagicMock(message=valid_msg, effective_user=MagicMock(id=9601))
+    end_state = await process_profile_relationship(update_valid, context)
+    assert end_state == ConversationHandler.END
+    assert "editing_friend_id" not in context.user_data
+    assert "editing_state" not in context.user_data
+
+    # Verify persisted in database
+    profile = handle_get_friend_profile(telegram_id=9601, friend_id=f_id, engine=thread_safe_engine)
+    assert profile["relationship"] == "Teammate"
+
+    # 4. Start prompt again and test cancellation after unsupported input
+    update_start2 = MagicMock(callback_query=mock_query, effective_user=MagicMock(id=9601))
+    state2 = await start_prompt_relationship(update_start2, context)
+    assert state2 == WAITING_FOR_PROFILE_RELATIONSHIP
+
+    # Unsupported input again
+    await invalid_profile_text_input(update_invalid, context)
+    assert context.user_data["editing_friend_id"] == f_id
+
+    # User cancels via ❌ Cancel
+    cancel_msg = MagicMock(text="❌ Cancel", reply_text=AsyncMock())
+    update_cancel = MagicMock(message=cancel_msg, callback_query=None, effective_user=MagicMock(id=9601))
+    canceled_state = await cancel_profile_input(update_cancel, context)
+    assert canceled_state == ConversationHandler.END
+    assert "editing_friend_id" not in context.user_data
+    assert "editing_state" not in context.user_data

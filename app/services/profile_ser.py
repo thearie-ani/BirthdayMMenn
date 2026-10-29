@@ -1,14 +1,24 @@
 """
-User profile and registration service.
+User and friend profile service.
 """
 import logging
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from app.database.database import get_session
 from app.database.models.user import User
 from app.database.repositories.user_repo import UserRepository
+from app.services.friend_ser import (
+    FriendNotFoundError,
+    UserNotRegisteredError,
+    clear_friend_profile_for_user,
+    get_friend_profile_for_user,
+    handle_clear_friend_profile,
+    handle_get_friend_profile,
+    handle_update_friend_profile,
+    update_friend_profile_for_user,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,3 +98,17 @@ def handle_user_registration(
             first_name=first_name,
             username=username,
         )
+
+
+__all__ = [
+    "FriendNotFoundError",
+    "UserNotRegisteredError",
+    "clear_friend_profile_for_user",
+    "get_friend_profile_for_user",
+    "handle_clear_friend_profile",
+    "handle_get_friend_profile",
+    "handle_update_friend_profile",
+    "handle_user_registration",
+    "register_or_update_user",
+    "update_friend_profile_for_user",
+]

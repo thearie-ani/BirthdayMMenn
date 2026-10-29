@@ -11,11 +11,13 @@ from app.database.database import (
     reset_db,
 )
 from app.database.models.friend import Friend
+from app.database.models.preference import FriendPreference
 from app.database.models.user import User
 
 __all__ = [
     "Base",
     "Friend",
+    "FriendPreference",
     "User",
     "get_default_engine",
     "get_engine",

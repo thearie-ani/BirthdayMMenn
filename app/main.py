@@ -21,8 +21,11 @@ from app.database.database import init_db
 from app.bot.handlers.start import start_command, help_command
 from app.bot.handlers.friends import (
     back_to_main_menu,
+    friend_profile_callback_handler,
     get_add_friend_conversation_handler,
+    get_friend_profile_conversation_handler,
     get_search_friend_conversation_handler,
+    open_friend_profile_command,
     view_my_friends,
 )
 from app.bot.handlers.birthday import upcoming_birthdays_command
@@ -54,6 +57,15 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(get_add_friend_conversation_handler())
     app.add_handler(get_search_friend_conversation_handler())
     app.add_handler(get_settings_conversation_handler())
+    app.add_handler(get_friend_profile_conversation_handler())
+    app.add_handler(
+        CallbackQueryHandler(
+            friend_profile_callback_handler,
+            pattern=r"^fprof_",
+        )
+    )
+    app.add_handler(CommandHandler("profile", open_friend_profile_command))
+    app.add_handler(CommandHandler("friend", open_friend_profile_command))
     app.add_handler(MessageHandler(filters.Regex(r"^👥 My Friends$"), view_my_friends))
     app.add_handler(CommandHandler("myfriends", view_my_friends))
     app.add_handler(CommandHandler("friends", view_my_friends))

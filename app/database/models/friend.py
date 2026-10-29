@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database.database import Base
 
 if TYPE_CHECKING:
+    from app.database.models.preference import FriendPreference
     from app.database.models.user import User
 
 
@@ -48,6 +49,15 @@ class Friend(Base):
 
     # Relationship to owning User
     user: Mapped["User"] = relationship("User", back_populates="friends")
+
+    # Relationship to optional FriendPreference
+    preference: Mapped[Optional["FriendPreference"]] = relationship(
+        "FriendPreference",
+        back_populates="friend",
+        cascade="all, delete-orphan",
+        uselist=False,
+        passive_deletes=True,
+    )
 
     __table_args__ = (
         CheckConstraint(
