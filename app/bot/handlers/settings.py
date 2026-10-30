@@ -201,6 +201,8 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         except Exception as err:
             logger.error("Failed to toggle setting %s for user %d: %s", target_field, telegram_id, err)
             await query.answer("Failed to update setting. Please try again.")
+    else:
+        await query.answer("⚠️ Unrecognized option.")
 
 
 # ==============================================================================
@@ -347,10 +349,14 @@ async def process_quick_timezone_callback(update: Update, context: ContextTypes.
         return ConversationHandler.END
 
     data = query.data
-    if not data.startswith("tz_set:"):
+    if not data or not data.startswith("tz_set:"):
+        await query.answer("⚠️ Invalid timezone selection.", show_alert=True)
         return ConversationHandler.END
 
-    tz_name = data.split("tz_set:", 1)[1].strip()
+    tz_name = data[len("tz_set:"):].strip()
+    if not tz_name:
+        await query.answer("⚠️ Invalid timezone selection.", show_alert=True)
+        return ConversationHandler.END
     effective_user = update.effective_user
     telegram_id = int(effective_user.id) if effective_user else 0
     engine = context.bot_data.get("db_engine") if hasattr(context, "bot_data") and isinstance(context.bot_data, dict) else None

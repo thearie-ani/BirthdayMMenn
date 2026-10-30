@@ -7,7 +7,7 @@ import logging
 from typing import Any, Dict, List, Optional
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.database.database import get_session
 from app.database.models.reminder import UserSetting
@@ -95,6 +95,9 @@ def get_due_reminders_for_user(
     Returns:
         List of detached dictionaries containing due reminder payloads.
     """
+    if not user.friends:
+        return []
+
     reminder_repo = ReminderRepository(session)
     settings = reminder_repo.get_or_create_user_setting(user.id)
 
@@ -164,6 +167,8 @@ def get_due_reminders_for_all_users(
 ) -> List[Dict[str, Any]]:
     """
     Scan all registered users and identify all due reminders across the system.
+    Uses eager loading (selectinload) to load users' friends efficiently in a
+    single batch query, avoiding N+1 roundtrips.
 
     Args:
         engine: Optional target SQLAlchemy Engine.
@@ -174,9 +179,11 @@ def get_due_reminders_for_all_users(
     """
     all_due: List[Dict[str, Any]] = []
     with get_session(engine) as session:
-        statement = select(User)
+        statement = select(User).options(selectinload(User.friends))
         users = session.execute(statement).scalars().all()
         for user in users:
+            if not user.friends:
+                continue
             user_due = get_due_reminders_for_user(
                 session=session, user=user, now_override=now_override
             )

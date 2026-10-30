@@ -65,6 +65,11 @@ from app.services.wish_ser import (
     handle_link_friend_telegram,
     handle_send_wish,
 )
+from app.utils.callback_utils import (
+    parse_callback_id,
+    parse_callback_id_and_value,
+    parse_callback_page,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -399,14 +404,20 @@ async def wish_callback_handler(
 
     # 4. Wish History Pagination
     if data.startswith("wish_hist:"):
+        page = parse_callback_page(data, "wish_hist:")
+        if page is None:
+            await query.answer("⚠️ Invalid page number.", show_alert=True)
+            return
         await query.answer()
-        page = int(data.split(":", 1)[1])
         await wish_history_command(update, context, page=page)
         return
 
     # 5. View Wish by ID
     if data.startswith("wish_view:"):
-        wish_id = int(data.split(":", 1)[1])
+        wish_id = parse_callback_id(data, "wish_view:")
+        if wish_id is None:
+            await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+            return
         try:
             wish = await asyncio.to_thread(
                 handle_get_wish, telegram_id=telegram_id, wish_id=wish_id, engine=engine
@@ -427,7 +438,10 @@ async def wish_callback_handler(
 
     # 6. Approve Wish
     if data.startswith("wish_approve:"):
-        wish_id = int(data.split(":", 1)[1])
+        wish_id = parse_callback_id(data, "wish_approve:")
+        if wish_id is None:
+            await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+            return
         try:
             wish = await asyncio.to_thread(
                 handle_approve_wish,
@@ -455,7 +469,10 @@ async def wish_callback_handler(
 
     # 7. Send Wish
     if data.startswith("wish_send:"):
-        wish_id = int(data.split(":", 1)[1])
+        wish_id = parse_callback_id(data, "wish_send:")
+        if wish_id is None:
+            await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+            return
         try:
             res = await handle_send_wish(
                 telegram_id=telegram_id,
@@ -516,7 +533,10 @@ async def wish_callback_handler(
 
     # 8. Copy Wish
     if data.startswith("wish_copy:"):
-        wish_id = int(data.split(":", 1)[1])
+        wish_id = parse_callback_id(data, "wish_copy:")
+        if wish_id is None:
+            await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+            return
         try:
             wish = await asyncio.to_thread(
                 handle_get_wish, telegram_id=telegram_id, wish_id=wish_id, engine=engine
@@ -542,8 +562,10 @@ async def wish_callback_handler(
 
     # 9. Show Style Picker
     if data.startswith("wish_styles:"):
-        id_str = data.split(":", 1)[1]
-        id_val = int(id_str)
+        id_val = parse_callback_id(data, "wish_styles:")
+        if id_val is None:
+            await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+            return
         await query.answer()
         # Determine whether id is wish_id or friend_id
         is_wish = True
@@ -577,14 +599,20 @@ async def wish_callback_handler(
     seed: Optional[int] = None
 
     if data.startswith("wish_select:"):
-        friend_id = int(data.split(":", 1)[1])
+        friend_id = parse_callback_id(data, "wish_select:")
+        if friend_id is None:
+            await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+            return
         existing_wish_id = None
         style = None
 
     elif data.startswith("wish_regen:"):
-        parts = data.split(":", 2)
-        id_val = int(parts[1])
-        style = parts[2] if len(parts) > 2 and parts[2] != "None" else None
+        parsed = parse_callback_id_and_value(data, "wish_regen:")
+        if parsed is None:
+            await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+            return
+        id_val, raw_style = parsed
+        style = raw_style if raw_style != "None" else None
         seed = random.randint(1000, 99999)
 
         # Check if id_val is an existing wish
@@ -600,9 +628,11 @@ async def wish_callback_handler(
             existing_wish_id = None
 
     elif data.startswith("wish_setstyle:"):
-        parts = data.split(":", 2)
-        id_val = int(parts[1])
-        style = parts[2] if len(parts) > 2 else None
+        parsed = parse_callback_id_and_value(data, "wish_setstyle:")
+        if parsed is None:
+            await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+            return
+        id_val, style = parsed
         seed = random.randint(1000, 99999)
 
         try:
@@ -616,6 +646,7 @@ async def wish_callback_handler(
             existing_wish_id = None
 
     if friend_id is None:
+        await query.answer("⚠️ Unrecognized option.")
         return
 
     # Check friend existence & ownership
@@ -740,7 +771,11 @@ async def wish_edit_start_callback(
     telegram_id = int(effective_user.id)
     engine, _ = _get_engine_and_client(context)
 
-    wish_id = int(query.data.split(":", 1)[1])
+    wish_id = parse_callback_id(query.data, "wish_edit:")
+    if wish_id is None:
+        await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+        return ConversationHandler.END
+
     try:
         wish = await asyncio.to_thread(
             handle_get_wish, telegram_id=telegram_id, wish_id=wish_id, engine=engine
@@ -861,9 +896,14 @@ async def wish_edit_cancel_callback(
     telegram_id = int(effective_user.id)
     engine, _ = _get_engine_and_client(context)
 
-    wish_id_str = query.data.split(":", 1)[1] if ":" in query.data else None
-    wish_id = int(wish_id_str) if wish_id_str else context.user_data.get("editing_wish_id")
-    context.user_data.pop("editing_wish_id", None)
+    wish_id = parse_callback_id(query.data, "wish_edit_cancel:")
+    if wish_id is None and context.user_data:
+        saved_id = context.user_data.get("editing_wish_id")
+        if isinstance(saved_id, int) and saved_id > 0:
+            wish_id = saved_id
+
+    if context.user_data:
+        context.user_data.pop("editing_wish_id", None)
 
     await query.answer("Editing cancelled.")
     if wish_id:

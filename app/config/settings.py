@@ -68,3 +68,14 @@ def get_ai_model() -> str:
     model = os.getenv("GEMINI_MODEL") or os.getenv("AI_MODEL") or "gemini-3.8-flash"
     return model.strip().strip("\"'")
 
+
+def get_ai_fallback_model() -> Optional[str]:
+    """
+    Retrieve the configured Gemini fallback model name.
+    Configurable via GEMINI_FALLBACK_MODEL or AI_FALLBACK_MODEL environment variable.
+    Returns None if not configured, empty, or set to placeholder.
+    """
+    fallback = os.getenv("GEMINI_FALLBACK_MODEL") or os.getenv("AI_FALLBACK_MODEL") or ""
+    clean = fallback.strip().strip("\"'")
+    return clean if clean else None
+

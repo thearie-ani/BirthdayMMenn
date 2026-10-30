@@ -54,6 +54,10 @@ from app.utils.validators import (
     validate_relationship,
     validate_wish_style,
 )
+from app.utils.callback_utils import (
+    parse_callback_id,
+    parse_callback_id_and_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -790,7 +794,10 @@ async def friend_profile_callback_handler(
 
     # 2. View friend profile: fprof_view:<friend_id>
     if data.startswith("fprof_view:"):
-        friend_id = int(data.split(":", 1)[1])
+        friend_id = parse_callback_id(data, "fprof_view:")
+        if friend_id is None:
+            await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+            return
         try:
             profile = await asyncio.to_thread(
                 handle_get_friend_profile,
@@ -813,7 +820,10 @@ async def friend_profile_callback_handler(
 
     # 3. Relationship preset menu: fprof_rel_menu:<friend_id>
     if data.startswith("fprof_rel_menu:"):
-        friend_id = int(data.split(":", 1)[1])
+        friend_id = parse_callback_id(data, "fprof_rel_menu:")
+        if friend_id is None:
+            await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+            return
         try:
             profile = await asyncio.to_thread(
                 handle_get_friend_profile,
@@ -834,9 +844,11 @@ async def friend_profile_callback_handler(
 
     # 4. Set relationship preset: fprof_set_rel:<friend_id>:<value>
     if data.startswith("fprof_set_rel:"):
-        parts = data.split(":", 2)
-        friend_id = int(parts[1])
-        rel_value = parts[2]
+        parsed = parse_callback_id_and_value(data, "fprof_set_rel:")
+        if parsed is None:
+            await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+            return
+        friend_id, rel_value = parsed
         try:
             updated = await asyncio.to_thread(
                 handle_update_friend_profile,
@@ -858,7 +870,10 @@ async def friend_profile_callback_handler(
 
     # 5. Wish style preset menu: fprof_style_menu:<friend_id>
     if data.startswith("fprof_style_menu:"):
-        friend_id = int(data.split(":", 1)[1])
+        friend_id = parse_callback_id(data, "fprof_style_menu:")
+        if friend_id is None:
+            await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+            return
         try:
             profile = await asyncio.to_thread(
                 handle_get_friend_profile,
@@ -879,9 +894,11 @@ async def friend_profile_callback_handler(
 
     # 6. Set wish style preset: fprof_set_style:<friend_id>:<value>
     if data.startswith("fprof_set_style:"):
-        parts = data.split(":", 2)
-        friend_id = int(parts[1])
-        style_value = parts[2]
+        parsed = parse_callback_id_and_value(data, "fprof_set_style:")
+        if parsed is None:
+            await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+            return
+        friend_id, style_value = parsed
         try:
             updated = await asyncio.to_thread(
                 handle_update_friend_profile,
@@ -903,7 +920,10 @@ async def friend_profile_callback_handler(
 
     # 7. Clear profile: fprof_clear:<friend_id>
     if data.startswith("fprof_clear:"):
-        friend_id = int(data.split(":", 1)[1])
+        friend_id = parse_callback_id(data, "fprof_clear:")
+        if friend_id is None:
+            await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+            return
         try:
             cleared = await asyncio.to_thread(
                 handle_clear_friend_profile,
@@ -921,6 +941,9 @@ async def friend_profile_callback_handler(
             logger.error("Failed to clear friend profile %d: %s", friend_id, err)
             await query.answer("Failed to clear profile.")
         return
+
+    # Fallback for unrecognized or malformed friend profile callbacks
+    await query.answer("⚠️ Unrecognized option.")
 
 
 # ==============================================================================
@@ -1001,7 +1024,10 @@ async def start_prompt_relationship(
     if query is None or query.data is None:
         return ConversationHandler.END
 
-    friend_id = int(query.data.split(":", 1)[1])
+    friend_id = parse_callback_id(query.data, "fprof_prompt_rel:")
+    if friend_id is None:
+        await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+        return ConversationHandler.END
     profile = await _verify_friend_profile_ownership(update, context, friend_id)
     if profile is None:
         return ConversationHandler.END
@@ -1092,7 +1118,10 @@ async def start_prompt_interests(
     if query is None or query.data is None:
         return ConversationHandler.END
 
-    friend_id = int(query.data.split(":", 1)[1])
+    friend_id = parse_callback_id(query.data, "fprof_prompt_interests:")
+    if friend_id is None:
+        await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+        return ConversationHandler.END
     profile = await _verify_friend_profile_ownership(update, context, friend_id)
     if profile is None:
         return ConversationHandler.END
@@ -1183,7 +1212,10 @@ async def start_prompt_notes(
     if query is None or query.data is None:
         return ConversationHandler.END
 
-    friend_id = int(query.data.split(":", 1)[1])
+    friend_id = parse_callback_id(query.data, "fprof_prompt_notes:")
+    if friend_id is None:
+        await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+        return ConversationHandler.END
     profile = await _verify_friend_profile_ownership(update, context, friend_id)
     if profile is None:
         return ConversationHandler.END
@@ -1274,7 +1306,10 @@ async def start_prompt_wish_style(
     if query is None or query.data is None:
         return ConversationHandler.END
 
-    friend_id = int(query.data.split(":", 1)[1])
+    friend_id = parse_callback_id(query.data, "fprof_prompt_style:")
+    if friend_id is None:
+        await query.answer("⚠️ Invalid or expired request.", show_alert=True)
+        return ConversationHandler.END
     profile = await _verify_friend_profile_ownership(update, context, friend_id)
     if profile is None:
         return ConversationHandler.END

@@ -41,6 +41,10 @@ from app.bot.handlers.wish import (
     wish_callback_handler,
     wish_history_command,
 )
+from app.bot.handlers.error_handler import (
+    dev_sim_error_command,
+    global_error_handler,
+)
 from app.scheduler.birthday_sch import setup_birthday_scheduler
 
 # Configure logging to display time, level, and message
@@ -128,6 +132,14 @@ def create_bot_application(token: str) -> Application:
             back_to_main_menu,
         )
     )
+
+    # Optional development-only error simulation command (disabled by default)
+    import os
+    if os.getenv("ALLOW_DEV_ERROR_SIMULATION", "").lower() in {"1", "true", "yes"}:
+        app.add_handler(CommandHandler("dev_sim_error", dev_sim_error_command))
+
+    # Register central global error handler
+    app.add_error_handler(global_error_handler)
 
     # Configure periodic background reminder scheduler
     if app.job_queue is not None:

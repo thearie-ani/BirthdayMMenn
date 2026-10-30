@@ -7,7 +7,11 @@ import time
 from typing import Any, Callable, Dict, Optional
 import httpx
 
-from app.config.settings import get_ai_api_key, get_ai_model
+from app.config.settings import (
+    get_ai_api_key,
+    get_ai_fallback_model,
+    get_ai_model,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,17 +61,23 @@ class AIResponseError(AIError):
     pass
 
 
+class AIModelUnavailableError(AIResponseError):
+    """Raised when a specific AI model is not found, deprecated, or unavailable (HTTP 404)."""
+    pass
+
+
 class GeminiClient:
     """
     Asynchronous client for interacting with the Google Gemini REST API.
-    Features granular connection/read timeouts, exponential backoff retries,
-    and safe diagnostic logging.
+    Features configurable primary and fallback models, granular timeouts,
+    exponential backoff retries, and safe diagnostic logging.
     """
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
+        fallback_model: Optional[str] = None,
         base_url: Optional[str] = None,
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
@@ -81,6 +91,9 @@ class GeminiClient:
     ) -> None:
         self.api_key = api_key if api_key is not None else get_ai_api_key()
         self.model = (model or get_ai_model()).strip().strip("\"'")
+        raw_fallback = fallback_model if fallback_model is not None else get_ai_fallback_model()
+        clean_fallback = raw_fallback.strip().strip("\"'") if raw_fallback else None
+        self.fallback_model = clean_fallback if clean_fallback and clean_fallback != self.model else None
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self.connect_timeout = connect_timeout
         self.read_timeout = read_timeout
@@ -91,6 +104,7 @@ class GeminiClient:
         self.max_backoff = max_backoff
         self.max_retry_after_wait = max_retry_after_wait
         self.sleep_func = sleep_func
+        self.last_used_model: Optional[str] = None
 
     @property
     def timeout_config(self) -> httpx.Timeout:
@@ -136,37 +150,51 @@ class GeminiClient:
         else:
             await asyncio.sleep(seconds)
 
-    async def generate_text(
+    def _is_eligible_for_fallback(self, error: Exception) -> bool:
+        """
+        Evaluate if an error encountered by the primary model qualifies for fallback.
+
+        Eligible errors:
+        - AIModelUnavailableError (HTTP 404 / model not found, unsupported, or deprecated)
+        - AIServiceUnavailableError (HTTP 503 high demand)
+        - AITimeoutError (connect or read timeout)
+        - AIRateLimitError (burst rate limit)
+        - AIQuotaExhaustedError (per-model quota exhaustion)
+        - AIResponseError when caused by 5xx server errors, network connection drops, or 404
+
+        Ineligible errors (fail fast without fallback):
+        - MissingApiKeyError (missing, placeholder, or HTTP 401 unauthorized)
+        - Client errors (HTTP 400 bad request, HTTP 403 forbidden)
+        - Content safety filter blocks
+        """
+        if isinstance(error, MissingApiKeyError):
+            return False
+
+        if isinstance(error, (AIModelUnavailableError, AIServiceUnavailableError, AITimeoutError, AIRateLimitError, AIQuotaExhaustedError)):
+            return True
+
+        if isinstance(error, AIResponseError):
+            err_msg = str(error).lower()
+            # Explicitly ineligible: client error, forbidden, safety filter
+            if any(term in err_msg for term in ["client error", "http 400", "http 401", "http 403", "safety filter", "blocked"]):
+                return False
+            # Eligible: 404, 5xx server errors, network failures
+            if any(term in err_msg for term in ["http 404", "unavailable", "not found", "http 500", "http 502", "http 503", "http 504", "failed to connect", "network error"]):
+                return True
+
+        return False
+
+    async def _execute_model_generation(
         self,
+        model: str,
         prompt: str,
         system_instruction: Optional[str] = None,
         max_output_tokens: int = 600,
     ) -> str:
         """
-        Generate text completion using Google Gemini REST generateContent API.
-        Compatible with Gemini 3.8 and Flash models.
-        Automatically retries temporary 503 / 5xx / 429 / connection timeout errors up to max_retries.
-
-        Args:
-            prompt: User prompt content.
-            system_instruction: Optional system instruction for tone/behavior.
-            max_output_tokens: Maximum tokens in response.
-
-        Returns:
-            The generated text response.
-
-        Raises:
-            MissingApiKeyError: If API key is missing, invalid, or placeholder.
-            AIQuotaExhaustedError: If AI daily quota is exceeded.
-            AIRateLimitError: If rate limit is hit and retries fail.
-            AIServiceUnavailableError: If service returns 503 high demand after retries.
-            AITimeoutError: If the request times out after retries.
-            AIResponseError: For other permanent API errors or empty responses.
+        Internal worker that executes generateContent request and retries for a specific model.
         """
-        self._validate_configuration()
-
-        # Sanitize model name: ensure prefix format models/... or just bare model
-        clean_model = self.model
+        clean_model = model
         if clean_model.startswith("models/"):
             clean_model = clean_model[len("models/"):]
 
@@ -217,7 +245,7 @@ class GeminiClient:
                         attempt_duration,
                         response.text[:200],
                     )
-                    raise AIResponseError(
+                    raise AIModelUnavailableError(
                         f"AI model '{clean_model}' was not found or is unavailable (HTTP 404). "
                         "Please verify the model name (e.g. gemini-3.8-flash)."
                     )
@@ -246,10 +274,11 @@ class GeminiClient:
                     )
                     if is_quota:
                         logger.warning(
-                            "Gemini API daily/plan quota exhausted (HTTP 429 after %.2fs)",
+                            "Gemini API daily/plan quota exhausted for model '%s' (HTTP 429 after %.2fs)",
+                            clean_model,
                             attempt_duration,
                         )
-                        raise AIQuotaExhaustedError("AI quota has been exhausted.")
+                        raise AIQuotaExhaustedError(f"AI quota for model '{clean_model}' has been exhausted.")
 
                     if is_last_attempt:
                         logger.warning(
@@ -282,7 +311,7 @@ class GeminiClient:
                         )
                         if response.status_code == 503:
                             raise AIServiceUnavailableError(
-                                "AI service is currently experiencing high demand (HTTP 503)."
+                                f"AI model '{clean_model}' is currently experiencing high demand (HTTP 503)."
                             )
                         raise AIResponseError(
                             f"AI service returned temporary error HTTP {response.status_code}."
@@ -313,7 +342,8 @@ class GeminiClient:
 
                 data = response.json()
                 logger.info(
-                    "Gemini API generateContent succeeded on attempt %d/%d in %.2fs",
+                    "Gemini API generateContent succeeded for model '%s' on attempt %d/%d in %.2fs",
+                    clean_model,
                     attempt + 1,
                     total_attempts,
                     attempt_duration,
@@ -424,4 +454,71 @@ class GeminiClient:
         if not cleaned_text:
             raise AIResponseError("AI service generated an empty response.")
 
+        self.last_used_model = clean_model
         return cleaned_text
+
+    async def generate_text(
+        self,
+        prompt: str,
+        system_instruction: Optional[str] = None,
+        max_output_tokens: int = 600,
+    ) -> str:
+        """
+        Generate text completion using Google Gemini REST generateContent API.
+        Compatible with Gemini 3.8 and Flash models.
+        Automatically retries temporary errors up to max_retries, and attempts
+        fallback model if primary model fails with an eligible error.
+
+        Args:
+            prompt: User prompt content.
+            system_instruction: Optional system instruction for tone/behavior.
+            max_output_tokens: Maximum tokens in response.
+
+        Returns:
+            The generated text response.
+
+        Raises:
+            MissingApiKeyError: If API key is missing, invalid, or placeholder.
+            AIQuotaExhaustedError: If AI daily quota is exceeded.
+            AIRateLimitError: If rate limit is hit and retries fail.
+            AIServiceUnavailableError: If service returns 503 high demand after retries.
+            AITimeoutError: If the request times out after retries.
+            AIModelUnavailableError: If the model is not found or unavailable.
+            AIResponseError: For other permanent API errors or empty responses.
+        """
+        self._validate_configuration()
+
+        try:
+            return await self._execute_model_generation(
+                model=self.model,
+                prompt=prompt,
+                system_instruction=system_instruction,
+                max_output_tokens=max_output_tokens,
+            )
+        except Exception as primary_error:
+            if not self.fallback_model or not self._is_eligible_for_fallback(primary_error):
+                raise primary_error
+
+            logger.warning(
+                "Primary AI model '%s' failed with %s (%s). Attempting fallback model '%s'...",
+                self.model,
+                type(primary_error).__name__,
+                primary_error,
+                self.fallback_model,
+            )
+
+            try:
+                return await self._execute_model_generation(
+                    model=self.fallback_model,
+                    prompt=prompt,
+                    system_instruction=system_instruction,
+                    max_output_tokens=max_output_tokens,
+                )
+            except Exception as fallback_error:
+                logger.error(
+                    "Fallback AI model '%s' also failed with %s: %s",
+                    self.fallback_model,
+                    type(fallback_error).__name__,
+                    fallback_error,
+                )
+                raise fallback_error

@@ -10,8 +10,13 @@ from app.ai.prompts import build_wish_prompt, normalize_style
 class WishGenerator:
     """Orchestrates personalized birthday wish generation using GeminiClient."""
 
-    def __init__(self, client: Optional[GeminiClient] = None) -> None:
-        self.client = client or GeminiClient()
+    def __init__(
+        self,
+        client: Optional[GeminiClient] = None,
+        model: Optional[str] = None,
+        fallback_model: Optional[str] = None,
+    ) -> None:
+        self.client = client or GeminiClient(model=model, fallback_model=fallback_model)
 
     async def generate_birthday_wish(
         self,
