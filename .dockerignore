@@ -1,0 +1,50 @@
+# Git and Version Control
+.git/
+.gitignore
+
+# Environment and Secret Files (NEVER include in Docker images)
+.env
+.env.*
+!.env.example
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Python Bytecode and Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# SQLite Databases and Temporary Database Files
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+birthday_mmenn.db
+birthday_mate.db
+
+# Backup Archives
+backups/
+
+# Testing and Tooling Caches
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE and Editor Configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker-specific files
+Dockerfile
+docker-compose*.yml
+.dockerignore
