@@ -34,7 +34,13 @@ from app.bot.handlers.settings import (
     open_settings_command,
     settings_callback_handler,
 )
-from app.bot.handlers.wish import create_wish_command, wish_callback_handler
+from app.bot.handlers.wish import (
+    create_wish_command,
+    get_edit_wish_conversation_handler,
+    link_friend_command,
+    wish_callback_handler,
+    wish_history_command,
+)
 from app.scheduler.birthday_sch import setup_birthday_scheduler
 
 # Configure logging to display time, level, and message
@@ -59,6 +65,7 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(get_search_friend_conversation_handler())
     app.add_handler(get_settings_conversation_handler())
     app.add_handler(get_friend_profile_conversation_handler())
+    app.add_handler(get_edit_wish_conversation_handler())
     app.add_handler(
         CallbackQueryHandler(
             friend_profile_callback_handler,
@@ -78,6 +85,16 @@ def create_bot_application(token: str) -> Application:
     )
     app.add_handler(CommandHandler("wish", create_wish_command))
     app.add_handler(CommandHandler("createwish", create_wish_command))
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^(📜 Wish History|Wish History)$"),
+            wish_history_command,
+        )
+    )
+    app.add_handler(CommandHandler("wishhistory", wish_history_command))
+    app.add_handler(CommandHandler("wishes", wish_history_command))
+    app.add_handler(CommandHandler("history", wish_history_command))
+    app.add_handler(CommandHandler("linkfriend", link_friend_command))
     app.add_handler(
         CallbackQueryHandler(
             wish_callback_handler,

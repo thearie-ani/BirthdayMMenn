@@ -2,8 +2,8 @@
 Friend database model.
 """
 from datetime import date, datetime, timezone
-from typing import TYPE_CHECKING, Optional, Union
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String
+from typing import TYPE_CHECKING, List, Optional, Union
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.database import Base
@@ -11,6 +11,7 @@ from app.database.database import Base
 if TYPE_CHECKING:
     from app.database.models.preference import FriendPreference
     from app.database.models.user import User
+    from app.database.models.wish import Wish
 
 
 class Friend(Base):
@@ -27,6 +28,8 @@ class Friend(Base):
         - `birthday`: Property providing a consistent string:
           - "YYYY-MM-DD" when birth year is known (e.g. "1995-10-27")
           - "MM-DD" when birth year is unknown (e.g. "10-27")
+        - `telegram_id`: Optional BigInteger representing a linked Telegram chat/user ID
+          where wishes can be directly sent upon user approval.
     """
     __tablename__ = "friends"
 
@@ -41,6 +44,7 @@ class Friend(Base):
     birth_month: Mapped[int] = mapped_column(Integer, nullable=False)
     birth_day: Mapped[int] = mapped_column(Integer, nullable=False)
     birth_year: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -56,6 +60,14 @@ class Friend(Base):
         back_populates="friend",
         cascade="all, delete-orphan",
         uselist=False,
+        passive_deletes=True,
+    )
+
+    # Relationship to wishes generated for this friend
+    wishes: Mapped[List["Wish"]] = relationship(
+        "Wish",
+        back_populates="friend",
+        cascade="all, delete-orphan",
         passive_deletes=True,
     )
 

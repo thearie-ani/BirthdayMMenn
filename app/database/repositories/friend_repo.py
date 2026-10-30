@@ -96,6 +96,23 @@ class FriendRepository:
         )
         return list(self.session.execute(statement).scalars().all())
 
+    def update_telegram_id(self, friend_id: int, telegram_id: Optional[int]) -> Optional[Friend]:
+        """
+        Update the linked Telegram ID for a friend.
+
+        Args:
+            friend_id: Friend's primary key ID.
+            telegram_id: Optional Telegram user/chat ID.
+
+        Returns:
+            The updated Friend instance or None.
+        """
+        friend = self.get_by_id(friend_id)
+        if friend:
+            friend.telegram_id = telegram_id
+            self.session.flush()
+        return friend
+
     def get_preference(self, friend_id: int) -> Optional[FriendPreference]:
         """
         Retrieve preference details for a friend by friend_id.

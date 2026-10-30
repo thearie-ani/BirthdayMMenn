@@ -3,7 +3,7 @@ Database configuration, session management, and schema initialization.
 """
 from contextlib import contextmanager
 from typing import Generator, Optional
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -115,10 +115,20 @@ def init_db(engine: Optional[Engine] = None) -> None:
         engine: Optional target engine. Uses default engine if omitted.
     """
     # Import all models to ensure they are registered with Base.metadata
-    from app.database.models import friend, preference, reminder, user  # noqa: F401
+    from app.database.models import friend, preference, reminder, user, wish  # noqa: F401
 
     target_engine = engine or get_default_engine()
     Base.metadata.create_all(bind=target_engine)
+
+    # Backward compatibility: safely add telegram_id to friends table if not present
+    try:
+        with target_engine.begin() as conn:
+            res = conn.execute(text("PRAGMA table_info(friends)")).fetchall()
+            cols = [r[1] for r in res]
+            if cols and "telegram_id" not in cols:
+                conn.execute(text("ALTER TABLE friends ADD COLUMN telegram_id BIGINT"))
+    except Exception:
+        pass
 
 
 def reset_db(engine: Optional[Engine] = None) -> None:
@@ -126,7 +136,7 @@ def reset_db(engine: Optional[Engine] = None) -> None:
     Drop all existing tables and re-create them.
     Useful for testing and isolated development environments.
     """
-    from app.database.models import friend, preference, reminder, user  # noqa: F401
+    from app.database.models import friend, preference, reminder, user, wish  # noqa: F401
 
     target_engine = engine or get_default_engine()
     Base.metadata.drop_all(bind=target_engine)
