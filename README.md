@@ -116,3 +116,32 @@ pip list
 - [ ] **Milestone 5:** Scheduler & automated reminder notifications (APScheduler)
 - [ ] **Milestone 6:** AI-powered personalized birthday wish generator
 - [ ] **Milestone 7:** Testing, error handling & deployment
+
+---
+
+## 🤖 AI-Assisted Development Journey
+
+BirthdayMate was built not only as a practical Telegram bot, but also as a hands-on learning journey where I explored AI-assisted software development using **Google Antigravity** as my AI coding partner.
+
+As a student, my goal was to use AI as an interactive learning and development tool rather than simply having an assistant generate code without understanding it. Throughout the project, I remained actively involved in directing requirements, reviewing changes, running tests, and understanding how each component works together.
+
+### My Development Approach
+
+I followed an iterative development cycle for each stage of the project:
+
+```text
+Explore → Plan → Understand → Build → Test → Review → Improve
+```
+
+### How I Used Google Antigravity Throughout the Project:
+
+- **Idea Exploration & MVP Planning:** Discussing feature ideas, refining requirements, and breaking the project into manageable milestones from MVP to production readiness.
+- **System Architecture & Database Design:** Exploring relational database schemas with SQLite and SQLAlchemy, establishing foreign key constraints, and designing a clean service/repository layer.
+- **Learning Technologies in Context:** Using Antigravity to explore asynchronous Python (`asyncio`), `python-telegram-bot` conversation flows, APScheduler background jobs, and the Google Gemini API.
+- **Collaborative Implementation:** Prompting Antigravity for feature implementations, studying the generated code, and understanding the logic behind different modules before integrating them.
+- **Testing, Debugging & Error Resolution:** Building automated test suites with `pytest` (growing the test suite to 313 passing tests), reproducing bugs, and learning how to diagnose and resolve runtime errors.
+- **Security & Reliability Hardening:** Identifying edge cases, validating Telegram callback payloads, implementing error handling with secret redaction, and designing resilient model fallback for the AI client.
+- **Containerization & Deployment Preparation:** Learning Docker and Docker Compose fundamentals, configuring persistent storage volumes for SQLite, implementing container health checks, and designing automated database backup routines.
+
+This project gave me valuable practical experience in modern software development workflows—showing how human oversight, systematic testing, and AI assistance can work together effectively.
+
