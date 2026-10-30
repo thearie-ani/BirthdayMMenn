@@ -16,13 +16,15 @@ START_MESSAGE = (
 HELP_MESSAGE = (
     "ℹ️ How BirthdayMate works:\n\n"
     "BirthdayMate is your personal birthday assistant! Here is what I will help you with:\n"
+    "• ✨ Create Wish: Generate personalized AI birthday wishes\n"
     "• ➕ Add Friend: Save your friends' names and birthdays\n"
     "• 👥 My Friends: View and manage your saved friend list\n"
     "• 🎂 Upcoming Birthdays: See upcoming celebrations\n"
     "• ⚙️ Settings: Customize notification times and preferences\n\n"
     "Commands:\n"
     "/start - Show the welcome message and main menu\n"
-    "/help  - Show this information message"
+    "/help  - Show this information message\n"
+    "/wish  - Generate a personalized birthday wish"
 )
 
 

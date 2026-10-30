@@ -34,6 +34,7 @@ from app.bot.handlers.settings import (
     open_settings_command,
     settings_callback_handler,
 )
+from app.bot.handlers.wish import create_wish_command, wish_callback_handler
 from app.scheduler.birthday_sch import setup_birthday_scheduler
 
 # Configure logging to display time, level, and message
@@ -69,6 +70,20 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(MessageHandler(filters.Regex(r"^👥 My Friends$"), view_my_friends))
     app.add_handler(CommandHandler("myfriends", view_my_friends))
     app.add_handler(CommandHandler("friends", view_my_friends))
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^(✨ Create Wish|Create Wish|✨ Create Wish 🎂)$"),
+            create_wish_command,
+        )
+    )
+    app.add_handler(CommandHandler("wish", create_wish_command))
+    app.add_handler(CommandHandler("createwish", create_wish_command))
+    app.add_handler(
+        CallbackQueryHandler(
+            wish_callback_handler,
+            pattern=r"^wish_",
+        )
+    )
     app.add_handler(
         MessageHandler(
             filters.Regex(r"^🎂 Upcoming Birthdays$"),

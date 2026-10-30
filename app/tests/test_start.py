@@ -42,6 +42,7 @@ def test_main_menu_keyboard_structure():
     # Flatten keyboard rows to get button texts
     button_texts = [btn.text for row in keyboard.keyboard for btn in row]
     expected_buttons = [
+        "✨ Create Wish",
         "➕ Add Friend",
         "👥 My Friends",
         "🎂 Upcoming Birthdays",
