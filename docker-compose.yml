@@ -1,0 +1,55 @@
+# ==============================================================================
+# BirthdayMate Telegram Bot - Docker Compose Configuration
+# Optimized for single-instance deployment on Linux x86-64 (e.g. GCP e2-micro VM)
+# ==============================================================================
+
+services:
+  birthdaymate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: birthdaymate:latest
+    container_name: birthdaymate_bot
+    restart: unless-stopped
+    init: true
+
+    # Inject runtime secrets securely (defaults to .env, or override via ENV_FILE=.env.test)
+    env_file:
+      - ${ENV_FILE:-.env}
+
+    environment:
+      # Ensure SQLite database is written inside the persistent mounted volume
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/birthday_mmenn.db
+      - PYTHONUNBUFFERED=1
+
+    # Persistent storage: isolates SQLite database and backups from disposable container filesystem
+    volumes:
+      - birthday_data:/app/data
+      - birthday_backups:/app/backups
+
+    # Lightweight container health check (process, database readability, and storage accessibility)
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    # Long polling requires outbound HTTPS only. No inbound ports exposed.
+
+    # Enforce strictly a single bot instance to avoid Telegram getUpdates 409 conflicts
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+volumes:
+  birthday_data:
+    name: birthdaymate_data
+  birthday_backups:
+    name: birthdaymate_backups

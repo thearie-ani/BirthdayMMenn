@@ -2,7 +2,7 @@
 Timezone and local time utilities for BirthdayMate.
 """
 from datetime import date, datetime
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 import zoneinfo
 
 DEFAULT_TIMEZONE = "Asia/Phnom_Penh"

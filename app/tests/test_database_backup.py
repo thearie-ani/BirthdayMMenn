@@ -10,9 +10,12 @@ import pytest
 
 from app.database.backup import (
     DatabaseBackupError,
+    apply_backup_retention,
     backup_database,
     get_default_database_path,
     list_backups,
+    restore_database,
+    verify_backup_integrity,
 )
 
 
@@ -188,3 +191,147 @@ def test_list_backups_sorted_by_modification_time(tmp_path):
 def test_list_backups_non_existent_directory(tmp_path):
     """Verify list_backups returns empty list for non-existent directory without crashing."""
     assert list_backups(backup_dir=tmp_path / "does_not_exist") == []
+
+
+def test_verify_backup_integrity_valid_db(tmp_path):
+    """Verify integrity check succeeds on a valid, uncorrupted SQLite database."""
+    db_file = tmp_path / "valid.db"
+    _create_sample_database(db_file)
+    assert verify_backup_integrity(db_file) is True
+
+
+def test_verify_backup_integrity_missing_and_empty(tmp_path):
+    """Verify integrity check fails for missing files and 0-byte files."""
+    missing = tmp_path / "does_not_exist.db"
+    assert verify_backup_integrity(missing) is False
+
+    empty = tmp_path / "empty.db"
+    empty.write_text("")
+    assert verify_backup_integrity(empty) is False
+
+
+def test_verify_backup_integrity_corrupted_file(tmp_path):
+    """Verify integrity check fails when SQLite file contents are corrupted."""
+    corrupt = tmp_path / "corrupt.db"
+    corrupt.write_text("THIS IS NOT A VALID SQLITE DATABASE FILE HEADER")
+    assert verify_backup_integrity(corrupt) is False
+
+
+def test_backup_database_with_verification(tmp_path):
+    """Verify backup_database succeeds and passes integrity verification."""
+    src_db = tmp_path / "source.db"
+    _create_sample_database(src_db)
+    backup_dir = tmp_path / "backups"
+
+    backup_file = backup_database(
+        source_path=src_db,
+        backup_dir=backup_dir,
+        verify=True,
+    )
+    assert backup_file.exists()
+    assert verify_backup_integrity(backup_file) is True
+
+
+def test_apply_backup_retention_pruning(tmp_path):
+    """Verify retention policy keeps only the specified count of newest backups."""
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+
+    # Create 5 backup files with staggered timestamps
+    created_files = []
+    for i in range(5):
+        f = backup_dir / f"test_db_backup_20261030_12000{i}.db"
+        f.write_text(f"backup {i}")
+        time.sleep(0.02)
+        created_files.append(f)
+
+    # Also add unrelated files that should NEVER be pruned
+    unrelated_txt = backup_dir / "notes.txt"
+    unrelated_txt.write_text("important user note")
+    unrelated_db = backup_dir / "other_database.db"
+    unrelated_db.write_text("another database without backup marker")
+
+    # Keep only the 2 newest backups
+    pruned = apply_backup_retention(backup_dir=backup_dir, keep_count=2, prefix_stem="test_db")
+
+    # Should prune 3 oldest backups
+    assert len(pruned) == 3
+    remaining = [f.name for f in backup_dir.iterdir() if f.name.endswith(".db") and "_backup_" in f.name]
+    assert len(remaining) == 2
+    # The two newest (index 4 and 3) should remain
+    assert "test_db_backup_20261030_120004.db" in remaining
+    assert "test_db_backup_20261030_120003.db" in remaining
+
+    # Unrelated files must NOT be touched
+    assert unrelated_txt.exists()
+    assert unrelated_db.exists()
+
+
+def test_apply_backup_retention_preserves_active_database(tmp_path, monkeypatch):
+    """Verify retention policy explicitly protects the active database from deletion."""
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    active_db = backup_dir / "birthday_mmenn.db"
+    _create_sample_database(active_db)
+
+    # Mock get_default_database_path to return active_db
+    monkeypatch.setattr("app.database.backup.get_default_database_path", lambda: active_db)
+
+    # Run retention with keep_count=0 (which is a no-op) or keep_count=1
+    pruned = apply_backup_retention(backup_dir=backup_dir, keep_count=1)
+    assert active_db not in pruned
+    assert active_db.exists()
+
+
+def test_restore_database_success(tmp_path):
+    """Verify restoring a database from backup recovers all schema and records accurately."""
+    src_db = tmp_path / "original.db"
+    backup_dir = tmp_path / "backups"
+    _create_sample_database(src_db)
+
+    # 1. Create a valid backup
+    backup_file = backup_database(source_path=src_db, backup_dir=backup_dir)
+
+    # 2. Restore into a fresh target path
+    restore_target = tmp_path / "restored.db"
+    restored = restore_database(backup_path=backup_file, target_path=restore_target, verify_first=True)
+
+    assert restored == restore_target
+    assert restore_target.exists()
+
+    # 3. Verify records inside restored database
+    conn = sqlite3.connect(restore_target)
+    users = conn.execute("SELECT id, name FROM users ORDER BY id").fetchall()
+    friends = conn.execute("SELECT id, name FROM friends ORDER BY id").fetchall()
+    conn.close()
+
+    assert users == [(1, "Alice"), (2, "Bob")]
+    assert friends == [(1, "Charlie"), (2, "Diana")]
+
+
+def test_restore_database_corrupt_fails_without_modifying_target(tmp_path):
+    """Verify restoring a corrupt backup fails fast and does not touch the target."""
+    corrupt_backup = tmp_path / "corrupt_backup.db"
+    corrupt_backup.write_text("NOT A SQLITE DB")
+
+    target_db = tmp_path / "target.db"
+    target_db.write_text("existing target data")
+
+    with pytest.raises(DatabaseBackupError) as exc_info:
+        restore_database(backup_path=corrupt_backup, target_path=target_db, verify_first=True)
+
+    assert "integrity" in str(exc_info.value).lower()
+    # Target file was preserved
+    assert target_db.read_text() == "existing target data"
+
+
+def test_restore_database_same_source_and_dest_raises_valueerror(tmp_path):
+    """Verify passing identical source and destination raises ValueError."""
+    dummy_backup = tmp_path / "backup.db"
+    _create_sample_database(dummy_backup)
+
+    with pytest.raises(ValueError) as exc_info:
+        restore_database(backup_path=dummy_backup, target_path=dummy_backup)
+
+    assert "cannot be the same" in str(exc_info.value).lower()
+
