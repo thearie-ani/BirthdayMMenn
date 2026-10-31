@@ -51,12 +51,14 @@ def get_database_url() -> str:
 def get_ai_api_key() -> Optional[str]:
     """
     Retrieve the AI API key from environment variables.
-    Returns None if missing, empty, or set to the placeholder.
+    Checks GEMINI_API_KEY first, then AI_API_KEY.
+    Returns None if missing, empty, or set to placeholder.
     """
-    key = os.getenv("AI_API_KEY", "").strip().strip("\"'")
-    if not key or key == "your_ai_api_key_here":
+    key = os.getenv("GEMINI_API_KEY") or os.getenv("AI_API_KEY") or ""
+    clean = key.strip().strip("\"'")
+    if not clean or clean in {"your_ai_api_key_here", "your_gemini_api_key_here"}:
         return None
-    return key
+    return clean
 
 
 def get_ai_model() -> str:
@@ -77,5 +79,6 @@ def get_ai_fallback_model() -> Optional[str]:
     """
     fallback = os.getenv("GEMINI_FALLBACK_MODEL") or os.getenv("AI_FALLBACK_MODEL") or ""
     clean = fallback.strip().strip("\"'")
-    return clean if clean else None
-
+    if not clean or clean in {"your_fallback_model_here", "your_verified_fallback_model"}:
+        return None
+    return clean
