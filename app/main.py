@@ -55,11 +55,30 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def ai_post_init(app: Application) -> None:
+    """Initialize shared GeminiClient in bot_data on application startup."""
+    from app.ai.client import GeminiClient
+    app.bot_data["ai_client"] = GeminiClient()
+
+
+async def ai_post_shutdown(app: Application) -> None:
+    """Cleanly close shared GeminiClient HTTP connections on shutdown."""
+    ai_client = app.bot_data.get("ai_client")
+    if ai_client and hasattr(ai_client, "close"):
+        await ai_client.close()
+
+
 def create_bot_application(token: str) -> Application:
     """
     Construct the Telegram Application and register command handlers.
     """
-    app = ApplicationBuilder().token(token).build()
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .post_init(ai_post_init)
+        .post_shutdown(ai_post_shutdown)
+        .build()
+    )
 
     # Register handlers
     app.add_handler(CommandHandler("start", start_command))

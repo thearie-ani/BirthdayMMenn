@@ -3,6 +3,7 @@ Async Gemini REST API client using httpx with granular timeouts and safe diagnos
 """
 import asyncio
 import logging
+import random
 import time
 from typing import Any, Callable, Dict, Optional
 import httpx
@@ -20,10 +21,10 @@ DEFAULT_CONNECT_TIMEOUT = 10.0   # Max seconds to establish connection with Goog
 DEFAULT_READ_TIMEOUT = 35.0      # Max seconds to wait for model response to be generated
 DEFAULT_WRITE_TIMEOUT = 10.0     # Max seconds to transmit request payload
 DEFAULT_POOL_TIMEOUT = 5.0       # Max seconds to acquire connection from pool
-DEFAULT_MAX_RETRIES = 2          # Maximum retries after initial attempt (3 attempts total)
+DEFAULT_MAX_RETRIES = 3          # Maximum retries after initial attempt (4 attempts total)
 DEFAULT_BASE_BACKOFF = 1.0       # Initial backoff delay in seconds
-DEFAULT_MAX_BACKOFF = 6.0        # Maximum exponential backoff delay
-DEFAULT_MAX_RETRY_AFTER_WAIT = 10.0  # Max acceptable delay from Retry-After header
+DEFAULT_MAX_BACKOFF = 8.0        # Maximum exponential backoff delay
+DEFAULT_MAX_RETRY_AFTER_WAIT = 15.0  # Max acceptable delay from Retry-After header
 
 
 class AIError(Exception):
@@ -61,23 +62,31 @@ class AIResponseError(AIError):
     pass
 
 
+class AINetworkError(AIResponseError):
+    """Raised when network connection or transport error occurs while contacting the AI service."""
+    pass
+
+
 class AIModelUnavailableError(AIResponseError):
     """Raised when a specific AI model is not found, deprecated, or unavailable (HTTP 404)."""
     pass
+
+
+_UNSET = object()
 
 
 class GeminiClient:
     """
     Asynchronous client for interacting with the Google Gemini REST API.
     Features configurable primary and fallback models, granular timeouts,
-    exponential backoff retries, and safe diagnostic logging.
+    connection pooling, exponential backoff with random jitter, and safe diagnostic logging.
     """
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
-        fallback_model: Optional[str] = None,
+        fallback_model: Any = _UNSET,
         base_url: Optional[str] = None,
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
@@ -87,11 +96,13 @@ class GeminiClient:
         base_backoff: float = DEFAULT_BASE_BACKOFF,
         max_backoff: float = DEFAULT_MAX_BACKOFF,
         max_retry_after_wait: float = DEFAULT_MAX_RETRY_AFTER_WAIT,
+        jitter: bool = True,
         sleep_func: Optional[Callable[[float], Any]] = None,
+        http_client: Optional[httpx.AsyncClient] = None,
     ) -> None:
         self.api_key = api_key if api_key is not None else get_ai_api_key()
         self.model = (model or get_ai_model()).strip().strip("\"'")
-        raw_fallback = fallback_model if fallback_model is not None else get_ai_fallback_model()
+        raw_fallback = get_ai_fallback_model() if fallback_model is _UNSET else fallback_model
         clean_fallback = raw_fallback.strip().strip("\"'") if raw_fallback else None
         self.fallback_model = clean_fallback if clean_fallback and clean_fallback != self.model else None
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
@@ -99,11 +110,14 @@ class GeminiClient:
         self.read_timeout = read_timeout
         self.write_timeout = write_timeout
         self.pool_timeout = pool_timeout
-        self.max_retries = max_retries
+        self.max_retries = max(0, max_retries)
         self.base_backoff = base_backoff
         self.max_backoff = max_backoff
         self.max_retry_after_wait = max_retry_after_wait
+        self.jitter = jitter
         self.sleep_func = sleep_func
+        self._http_client = http_client
+        self._owns_http_client = http_client is None
         self.last_used_model: Optional[str] = None
 
     @property
@@ -116,16 +130,44 @@ class GeminiClient:
             pool=self.pool_timeout,
         )
 
+    async def get_http_client(self) -> httpx.AsyncClient:
+        """
+        Retrieve or initialize the reusable httpx.AsyncClient instance
+        with granular timeout configuration and connection pooling.
+        """
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=self.timeout_config)
+            self._owns_http_client = True
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Cleanly close the underlying HTTP client (alias for close)."""
+        await self.close()
+
+    async def close(self) -> None:
+        """Cleanly close the underlying HTTP client during application shutdown."""
+        if self._http_client is not None and not self._http_client.is_closed:
+            if self._owns_http_client:
+                await self._http_client.aclose()
+            self._http_client = None
+
+    async def __aenter__(self) -> "GeminiClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
+
     def _validate_configuration(self) -> None:
         """Verify that an API key is provided and not set to a placeholder."""
-        if not self.api_key or self.api_key.strip() in {"", "your_ai_api_key_here"}:
+        if not self.api_key or self.api_key.strip() in {"", "your_ai_api_key_here", "your_gemini_api_key_here"}:
             raise MissingApiKeyError(
-                "AI_API_KEY is not configured or is still set to placeholder."
+                "Gemini API key is not configured or is still set to placeholder."
             )
 
     def _calculate_delay(self, response: Optional[httpx.Response], attempt: int) -> float:
         """
         Determine retry backoff delay, respecting Retry-After header if provided.
+        Applies exponential backoff with random jitter if jitter is enabled.
         """
         if response is not None:
             retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
@@ -137,9 +179,13 @@ class GeminiClient:
                 except ValueError:
                     pass
 
-        # Exponential backoff: base * 2^attempt (e.g. 1.0s, 2.0s)
-        backoff = self.base_backoff * (2 ** attempt)
-        return min(backoff, self.max_backoff)
+        # Exponential backoff: base * 2^attempt (e.g. 1.0s, 2.0s, 4.0s, 8.0s)
+        base_delay = min(self.base_backoff * (2 ** attempt), self.max_backoff)
+        if self.jitter and base_delay > 0:
+            # Jitter: add random uniform jitter between 0 and min(1.0, base_delay * 0.5)
+            jitter_amount = random.uniform(0.0, min(1.0, base_delay * 0.5))
+            return min(base_delay + jitter_amount, self.max_backoff)
+        return base_delay
 
     async def _sleep(self, seconds: float) -> None:
         """Internal sleep helper; can be overridden or mocked in tests."""
@@ -158,6 +204,7 @@ class GeminiClient:
         - AIModelUnavailableError (HTTP 404 / model not found, unsupported, or deprecated)
         - AIServiceUnavailableError (HTTP 503 high demand)
         - AITimeoutError (connect or read timeout)
+        - AINetworkError (connection failure or network transport drop)
         - AIRateLimitError (burst rate limit)
         - AIQuotaExhaustedError (per-model quota exhaustion)
         - AIResponseError when caused by 5xx server errors, network connection drops, or 404
@@ -170,7 +217,17 @@ class GeminiClient:
         if isinstance(error, MissingApiKeyError):
             return False
 
-        if isinstance(error, (AIModelUnavailableError, AIServiceUnavailableError, AITimeoutError, AIRateLimitError, AIQuotaExhaustedError)):
+        if isinstance(
+            error,
+            (
+                AIModelUnavailableError,
+                AIServiceUnavailableError,
+                AITimeoutError,
+                AINetworkError,
+                AIRateLimitError,
+                AIQuotaExhaustedError,
+            ),
+        ):
             return True
 
         if isinstance(error, AIResponseError):
@@ -179,7 +236,7 @@ class GeminiClient:
             if any(term in err_msg for term in ["client error", "http 400", "http 401", "http 403", "safety filter", "blocked"]):
                 return False
             # Eligible: 404, 5xx server errors, network failures
-            if any(term in err_msg for term in ["http 404", "unavailable", "not found", "http 500", "http 502", "http 503", "http 504", "failed to connect", "network error"]):
+            if any(term in err_msg for term in ["http 404", "unavailable", "not found", "http 500", "http 502", "http 503", "http 504", "failed to connect", "network error", "connection"]):
                 return True
 
         return False
@@ -193,6 +250,7 @@ class GeminiClient:
     ) -> str:
         """
         Internal worker that executes generateContent request and retries for a specific model.
+        Reuses persistent httpx.AsyncClient connection pool across attempts.
         """
         clean_model = model
         if clean_model.startswith("models/"):
@@ -227,14 +285,14 @@ class GeminiClient:
         total_attempts = 1 + self.max_retries
         total_start = time.perf_counter()
 
+        client = await self.get_http_client()
+
         for attempt in range(total_attempts):
             is_last_attempt = (attempt == self.max_retries)
             attempt_start = time.perf_counter()
 
             try:
-                async with httpx.AsyncClient(timeout=self.timeout_config) as client:
-                    response = await client.post(endpoint, json=payload, headers=headers)
-
+                response = await client.post(endpoint, json=payload, headers=headers)
                 attempt_duration = time.perf_counter() - attempt_start
 
                 # 1. Permanent Errors: Do NOT retry (400, 401, 403, 404)
@@ -252,8 +310,9 @@ class GeminiClient:
 
                 if response.status_code in {400, 401, 403}:
                     logger.error(
-                        "Gemini API permanent client error HTTP %d after %.2fs: %s",
+                        "Gemini API permanent client error HTTP %d for model '%s' after %.2fs: %s",
                         response.status_code,
+                        clean_model,
                         attempt_duration,
                         response.text[:200],
                     )
@@ -282,17 +341,19 @@ class GeminiClient:
 
                     if is_last_attempt:
                         logger.warning(
-                            "Gemini API burst rate limit (HTTP 429) persisted after %d attempts (%.2fs)",
+                            "Gemini API burst rate limit (HTTP 429) persisted after %d attempts for model '%s' (%.2fs)",
                             attempt + 1,
+                            clean_model,
                             attempt_duration,
                         )
                         raise AIRateLimitError("AI service rate limit exceeded.")
 
                     delay = self._calculate_delay(response, attempt)
                     logger.info(
-                        "Gemini API burst rate limit (HTTP 429 on attempt %d/%d, %.2fs). Retrying in %.1fs...",
+                        "Gemini API burst rate limit (HTTP 429 on attempt %d/%d for model '%s', %.2fs). Retrying in %.2fs...",
                         attempt + 1,
                         total_attempts,
+                        clean_model,
                         attempt_duration,
                         delay,
                     )
@@ -303,9 +364,10 @@ class GeminiClient:
                 if response.status_code in {500, 502, 503, 504}:
                     if is_last_attempt:
                         logger.error(
-                            "Gemini API error HTTP %d persisted after %d attempts (%.2fs): %s",
+                            "Gemini API error HTTP %d persisted after %d attempts for model '%s' (%.2fs): %s",
                             response.status_code,
                             attempt + 1,
+                            clean_model,
                             attempt_duration,
                             response.text[:200],
                         )
@@ -319,10 +381,11 @@ class GeminiClient:
 
                     delay = self._calculate_delay(response, attempt)
                     logger.warning(
-                        "Gemini API HTTP %d on attempt %d/%d (took %.2fs). Retrying in %.1fs...",
+                        "Gemini API HTTP %d on attempt %d/%d for model '%s' (took %.2fs). Retrying in %.2fs...",
                         response.status_code,
                         attempt + 1,
                         total_attempts,
+                        clean_model,
                         attempt_duration,
                         delay,
                     )
@@ -331,8 +394,9 @@ class GeminiClient:
 
                 if response.is_error:
                     logger.error(
-                        "Gemini API unhandled HTTP %d after %.2fs: %s",
+                        "Gemini API unhandled HTTP %d for model '%s' after %.2fs: %s",
                         response.status_code,
+                        clean_model,
                         attempt_duration,
                         response.text[:200],
                     )
@@ -348,7 +412,7 @@ class GeminiClient:
                     total_attempts,
                     attempt_duration,
                 )
-                break  # Successful response received, exit loop
+                break  # Successful response received, exit retry loop
 
             except httpx.TimeoutException as exc:
                 attempt_duration = time.perf_counter() - attempt_start
@@ -363,11 +427,12 @@ class GeminiClient:
                 if is_last_attempt:
                     total_elapsed = time.perf_counter() - total_start
                     logger.warning(
-                        "Gemini API request failed with %s on final attempt %d/%d "
+                        "Gemini API request failed with %s on final attempt %d/%d for model '%s' "
                         "(attempt duration: %.2fs, total time elapsed: %.2fs)",
                         timeout_type,
                         attempt + 1,
                         total_attempts,
+                        clean_model,
                         attempt_duration,
                         total_elapsed,
                     )
@@ -377,10 +442,11 @@ class GeminiClient:
 
                 delay = self._calculate_delay(None, attempt)
                 logger.warning(
-                    "Gemini API %s on attempt %d/%d (after %.2fs). Retrying in %.1fs...",
+                    "Gemini API %s on attempt %d/%d for model '%s' (after %.2fs). Retrying in %.2fs...",
                     timeout_type,
                     attempt + 1,
                     total_attempts,
+                    clean_model,
                     attempt_duration,
                     delay,
                 )
@@ -390,24 +456,26 @@ class GeminiClient:
             except (AIError, MissingApiKeyError):
                 raise
 
-            except httpx.RequestError as exc:
+            except (httpx.NetworkError, httpx.RequestError) as exc:
                 attempt_duration = time.perf_counter() - attempt_start
                 if is_last_attempt:
                     logger.error(
-                        "Network error connecting to Gemini API on final attempt %d/%d (%.2fs): %s",
+                        "Network error connecting to Gemini API on final attempt %d/%d for model '%s' (%.2fs): %s",
                         attempt + 1,
                         total_attempts,
+                        clean_model,
                         attempt_duration,
                         type(exc).__name__,
                     )
-                    raise AIResponseError("Failed to connect to AI service.") from exc
+                    raise AINetworkError(f"Failed to connect to AI service: {type(exc).__name__}") from exc
 
                 delay = self._calculate_delay(None, attempt)
                 logger.warning(
-                    "Network error (%s) on attempt %d/%d (%.2fs). Retrying in %.1fs...",
+                    "Network error (%s) on attempt %d/%d for model '%s' (%.2fs). Retrying in %.2fs...",
                     type(exc).__name__,
                     attempt + 1,
                     total_attempts,
+                    clean_model,
                     attempt_duration,
                     delay,
                 )
@@ -417,9 +485,10 @@ class GeminiClient:
             except Exception as exc:
                 attempt_duration = time.perf_counter() - attempt_start
                 logger.error(
-                    "Unexpected error in Gemini API call on attempt %d/%d (%.2fs): %s",
+                    "Unexpected error in Gemini API call on attempt %d/%d for model '%s' (%.2fs): %s",
                     attempt + 1,
                     total_attempts,
+                    clean_model,
                     attempt_duration,
                     exc,
                 )
@@ -439,17 +508,43 @@ class GeminiClient:
             raise AIResponseError("AI service returned no candidates.")
 
         first_candidate = candidates[0]
-        finish_reason = first_candidate.get("finishReason")
-        if finish_reason == "SAFETY":
-            raise AIResponseError("AI response was blocked by safety filters.")
+        if not isinstance(first_candidate, dict):
+            raise AIResponseError("AI service returned invalid candidate structure.")
 
-        content = first_candidate.get("content", {})
-        parts = content.get("parts", [])
-        if not parts:
+        finish_reason = first_candidate.get("finishReason")
+        if finish_reason in {"SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"}:
+            raise AIResponseError(f"AI response was blocked by safety filters ({finish_reason}).")
+
+        content = first_candidate.get("content")
+        if not content or not isinstance(content, dict):
+            if finish_reason:
+                raise AIResponseError(f"AI candidate contained no content (finish reason: {finish_reason}).")
+            raise AIResponseError("AI candidate contained no content.")
+
+        parts = content.get("parts")
+        if not parts or not isinstance(parts, list):
+            if finish_reason:
+                raise AIResponseError(f"AI candidate contained no content parts (finish reason: {finish_reason}).")
             raise AIResponseError("AI candidate contained no content parts.")
 
-        text_part = parts[0].get("text", "")
-        cleaned_text = text_part.strip()
+        text_parts = []
+        for p in parts:
+            if isinstance(p, dict):
+                # Omit thought parts if flagged with thought: True
+                if not p.get("thought", False):
+                    txt = p.get("text", "")
+                    if txt:
+                        text_parts.append(txt)
+
+        # Fallback if text_parts is empty but parts exist
+        if not text_parts:
+            for p in parts:
+                if isinstance(p, dict):
+                    txt = p.get("text", "")
+                    if txt:
+                        text_parts.append(txt)
+
+        cleaned_text = "".join(text_parts).strip()
 
         if not cleaned_text:
             raise AIResponseError("AI service generated an empty response.")
@@ -483,6 +578,7 @@ class GeminiClient:
             AIRateLimitError: If rate limit is hit and retries fail.
             AIServiceUnavailableError: If service returns 503 high demand after retries.
             AITimeoutError: If the request times out after retries.
+            AINetworkError: If connection failure occurs after retries.
             AIModelUnavailableError: If the model is not found or unavailable.
             AIResponseError: For other permanent API errors or empty responses.
         """
@@ -497,10 +593,16 @@ class GeminiClient:
             )
         except Exception as primary_error:
             if not self.fallback_model or not self._is_eligible_for_fallback(primary_error):
+                logger.error(
+                    "Final AI generation failure for primary model '%s' (category: %s): %s",
+                    self.model,
+                    type(primary_error).__name__,
+                    primary_error,
+                )
                 raise primary_error
 
             logger.warning(
-                "Primary AI model '%s' failed with %s (%s). Attempting fallback model '%s'...",
+                "Primary AI model '%s' failed with %s (%s). Fallback activated: attempting fallback model '%s'...",
                 self.model,
                 type(primary_error).__name__,
                 primary_error,
@@ -508,17 +610,23 @@ class GeminiClient:
             )
 
             try:
-                return await self._execute_model_generation(
+                result = await self._execute_model_generation(
                     model=self.fallback_model,
                     prompt=prompt,
                     system_instruction=system_instruction,
                     max_output_tokens=max_output_tokens,
                 )
+                logger.info(
+                    "Gemini API wish generation succeeded using fallback model '%s'",
+                    self.fallback_model,
+                )
+                return result
             except Exception as fallback_error:
                 logger.error(
-                    "Fallback AI model '%s' also failed with %s: %s",
+                    "Fallback AI model '%s' also failed with %s: %s (final failure category: %s)",
                     self.fallback_model,
                     type(fallback_error).__name__,
                     fallback_error,
+                    type(fallback_error).__name__,
                 )
                 raise fallback_error
