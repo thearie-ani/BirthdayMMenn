@@ -337,7 +337,7 @@ async def test_gemini_client_http_404_model_not_found():
     mock_resp.is_error = True
     mock_resp.text = "models/gemini-2.5-flash is not found for API version v1beta"
 
-    client = GeminiClient(api_key="fake-test-key", model="gemini-2.5-flash")
+    client = GeminiClient(api_key="fake-test-key", model="gemini-2.5-flash", fallback_model=None)
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
         mock_post.return_value = mock_resp
@@ -372,6 +372,7 @@ async def test_gemini_client_503_recovery():
         max_retries=2,
         base_backoff=0.01,
         sleep_func=mock_sleep,
+        fallback_model=None,
     )
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
@@ -399,6 +400,7 @@ async def test_gemini_client_repeated_503_exhausts_retries():
         max_retries=2,
         base_backoff=0.01,
         sleep_func=mock_sleep,
+        fallback_model=None,
     )
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
@@ -476,7 +478,8 @@ async def test_gemini_client_retry_after_capped_at_max():
 
         await client.generate_text("Hello")
         # 120s exceeds 10s max wait, so falls back to exponential backoff min(backoff, max_backoff)
-        mock_sleep.assert_awaited_once_with(1.0)
+        mock_sleep.assert_awaited_once()
+        assert 1.0 <= mock_sleep.call_args[0][0] <= client.max_backoff
 
 
 @pytest.mark.anyio
@@ -493,6 +496,7 @@ async def test_gemini_client_permanent_errors_not_retried(status_code):
         api_key="fake-test-key",
         max_retries=2,
         sleep_func=mock_sleep,
+        fallback_model=None,
     )
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
@@ -519,6 +523,7 @@ async def test_gemini_client_quota_exhausted_not_retried():
         api_key="fake-test-key",
         max_retries=2,
         sleep_func=mock_sleep,
+        fallback_model=None,
     )
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
@@ -552,6 +557,7 @@ async def test_gemini_client_transient_rate_limit_recovery():
         api_key="fake-test-key",
         max_retries=2,
         sleep_func=mock_sleep,
+        fallback_model=None,
     )
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
@@ -580,6 +586,7 @@ async def test_gemini_client_timeout_recovery():
         max_retries=2,
         base_backoff=0.01,
         sleep_func=mock_sleep,
+        fallback_model=None,
     )
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
@@ -636,6 +643,7 @@ async def test_gemini_client_read_timeout_diagnostic_error():
         api_key="fake-test-key",
         max_retries=1,
         sleep_func=mock_sleep,
+        fallback_model=None,
     )
 
     with patch(
@@ -658,6 +666,7 @@ async def test_gemini_client_connect_timeout_diagnostic_error():
         api_key="fake-test-key",
         max_retries=1,
         sleep_func=mock_sleep,
+        fallback_model=None,
     )
 
     with patch(

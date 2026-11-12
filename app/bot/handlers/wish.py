@@ -25,6 +25,8 @@ from telegram.ext import (
 
 from app.ai.client import (
     AIError,
+    AIModelUnavailableError,
+    AINetworkError,
     AIQuotaExhaustedError,
     AIResponseError,
     AIRateLimitError,
@@ -725,6 +727,13 @@ async def wish_callback_handler(
         await _safe_edit_callback_message(
             query,
             text=TIMEOUT_MESSAGE,
+            reply_markup=get_wish_error_keyboard(existing_wish_id or friend_id, is_wish_id=bool(existing_wish_id)),
+        )
+    except AINetworkError as err:
+        logger.error("Network error connecting to AI service for friend %d: %s", friend_id, err)
+        await _safe_edit_callback_message(
+            query,
+            text=GENERIC_AI_ERROR_MESSAGE,
             reply_markup=get_wish_error_keyboard(existing_wish_id or friend_id, is_wish_id=bool(existing_wish_id)),
         )
     except (AIResponseError, AIError) as err:
